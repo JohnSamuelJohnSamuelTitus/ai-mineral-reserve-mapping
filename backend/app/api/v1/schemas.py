@@ -81,6 +81,7 @@ class IngestionProviderResult(BaseModel):
     status: str
     records_written: int
     fetched_count: int = 0
+    job_id: str | None = None
     error: str | None = None
 
 
@@ -138,6 +139,11 @@ class RasterAssetResponse(BaseModel):
     requires_auth: bool = False
     estimated_size_mb: float | None = None
     bands_available: list[str] = Field(default_factory=list)
+    crs_epsg: int | None = None
+    checksum_sha256: str | None = None
+    source_provider: str | None = None
+    downloaded_bands: dict[str, dict] = Field(default_factory=dict)
+    band_metadata_summary: dict = Field(default_factory=dict)
     data_origin: str
     collected_at: datetime
 
@@ -219,7 +225,12 @@ class ProcessingJobResponse(BaseModel):
 class FeatureExtractRequest(BaseModel):
     resolution_m: float = Field(default=100.0, gt=5.0, le=5000.0)
     dem_asset_id: str | None = None
+    dem_asset_ids: list[str] | None = None
+    sentinel_asset_id: str | None = None
+    aster_asset_id: str | None = None
     include_geology: bool = True
+    include_sentinel2: bool = True
+    include_aster: bool = True
     run_sync: bool = False
 
 

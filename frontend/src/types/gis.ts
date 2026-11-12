@@ -75,6 +75,21 @@ export interface GeologicalUnitItem {
   collected_at: string;
 }
 
+export interface DownloadedBandInfo {
+  local_path: string;
+  checksum_sha256: string;
+  crs_epsg: number | null;
+  width: number;
+  height: number;
+  band_count?: number;
+  size_mb: number;
+  dtype?: string | null;
+  native_resolution?: number[] | null;
+  nodata?: number | null;
+  band_descriptions?: string[];
+  source_asset_key?: string;
+}
+
 export interface RasterAssetItem {
   id: string;
   stac_collection: string | null;
@@ -92,8 +107,32 @@ export interface RasterAssetItem {
   requires_auth: boolean;
   estimated_size_mb: number | null;
   bands_available: string[];
+  crs_epsg?: number | null;
+  checksum_sha256?: string | null;
+  source_provider?: string | null;
+  downloaded_bands?: Record<string, DownloadedBandInfo>;
+  band_metadata_summary?: {
+    provider_key?: string | null;
+    downloaded_band_keys?: string[];
+    asset_info_keys?: string[];
+    auth_note?: string | null;
+  };
   data_origin: string;
   collected_at: string;
+}
+
+export interface IngestionProviderResultItem {
+  provider_key: string;
+  status: string;
+  records_written: number;
+  fetched_count: number;
+  job_id: string | null;
+  error: string | null;
+}
+
+export interface IngestionRunResult {
+  aoi_id: string;
+  results: IngestionProviderResultItem[];
 }
 
 export interface GIBSLayerItem {
@@ -150,6 +189,11 @@ export interface FeatureManifestItem {
   manifest_json: {
     feature_stats?: Record<string, FeatureStatSummary>;
     feature_docs?: Record<string, unknown>[];
+    dem_source_tile_ids?: string[];
+    dem_coverage_pct?: number | null;
+    dem_mosaic_crs?: string | null;
+    spectral_sensors?: string[];
+    aster_band_mapping?: Record<string, unknown>;
     [key: string]: unknown;
   };
   data_origin: string;

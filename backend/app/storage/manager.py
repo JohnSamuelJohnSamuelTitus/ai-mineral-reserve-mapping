@@ -9,8 +9,59 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 _SAFE_SEGMENT_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_SENSITIVE_QUERY_KEYS = frozenset(
+    {
+        "sig",
+        "se",
+        "sp",
+        "sr",
+        "st",
+        "sv",
+        "skoid",
+        "sktid",
+        "skt",
+        "ske",
+        "sks",
+        "skv",
+        "token",
+        "access_token",
+        "api_key",
+        "apikey",
+        "key",
+        "authorization",
+        "sas",
+    }
+)
+_URL_QUERY_RE = re.compile(r"https?://[^\s'\"]+\?[^\s'\"]+")
+
+
+_BEARER_AUTH_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9_\-\.]+", re.IGNORECASE)
+
+
+def sanitize_url_for_storage(url: str) -> str:
+    """Remove temporary SAS tokens, API keys, and auth query params before saving/logging."""
+    if not url or "?" not in url:
+        return url
+    parsed = urlparse(url)
+    if not parsed.query:
+        return url
+    filtered = [
+        (k, v)
+        for k, v in parse_qsl(parsed.query, keep_blank_values=True)
+        if k.lower() not in _SENSITIVE_QUERY_KEYS
+    ]
+    return urlunparse(parsed._replace(query=urlencode(filtered)))
+
+
+def scrub_secrets_from_text(text: str) -> str:
+    """Redact SAS signatures, query tokens, and auth bearer tokens from arbitrary log or error messages."""
+    if not text:
+        return text
+    cleaned = _URL_QUERY_RE.sub(lambda m: sanitize_url_for_storage(m.group(0)), text)
+    return _BEARER_AUTH_RE.sub(r"\1[REDACTED]", cleaned)
 
 
 class UnsafePathError(ValueError):

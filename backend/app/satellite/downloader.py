@@ -14,9 +14,11 @@ from rasterio.windows import Window, from_bounds
 from app.core.logging import get_logger
 from app.storage.manager import (
     StorageLimitError,
+    UnsafePathError,
     check_free_disk_space,
     resolve_safe_path,
     sanitize_filename,
+    scrub_secrets_from_text,
     sha256_file,
     validate_file_size,
 )
@@ -33,7 +35,11 @@ class ClippedDownloadResult:
     height: int
     count: int
     size_mb: float
+    size_bytes: int
     nodata: float | None
+    dtype: str
+    native_resolution: tuple[float, float]
+    band_descriptions: list[str | None]
 
 
 def download_cog_window_for_aoi(
@@ -45,14 +51,17 @@ def download_cog_window_for_aoi(
     filename_stem: str,
     max_download_mb: float = 150.0,
     min_free_disk_gb: float = 2.0,
+    fallback_nodata: float | None = None,
 ) -> ClippedDownloadResult:
-    """Read ONLY the AOI-intersecting pixel window from a COG URL/path and write a GeoTIFF."""
+    """Read ONLY the AOI-intersecting pixel window from a COG URL/path and write a GeoTIFF atomically."""
     check_free_disk_space(output_dir, min_free_gb=min_free_disk_gb, required_mb=20.0)
     safe_aoi = sanitize_filename(aoi_id, fallback="aoi")
     safe_name = sanitize_filename(filename_stem, fallback="scene") + ".tif"
     target_path = resolve_safe_path(output_dir, safe_aoi, safe_name)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = target_path.with_suffix(".tif.tmp")
+    if tmp_path.exists():
+        tmp_path.unlink(missing_ok=True)
 
     vsi_env: dict[str, Any] = {
         "AWS_NO_SIGN_REQUEST": "YES",
@@ -83,12 +92,18 @@ def download_cog_window_for_aoi(
                 raise ValueError("AOI bbox does not intersect the remote raster extent")
 
             clamped_win = Window(col_off=col_off, row_off=row_off, width=width, height=height)
-            dtype_bytes = np.dtype(src.dtypes[0]).itemsize
+            dtype_str = str(src.dtypes[0])
+            dtype_bytes = np.dtype(dtype_str).itemsize
             est_bytes = width * height * src.count * dtype_bytes
             validate_file_size(est_bytes, max_mb=max_download_mb)
 
             data = src.read(window=clamped_win)
             out_transform = src.window_transform(clamped_win)
+            src_descriptions = list(src.descriptions or [])
+            effective_nodata = src.nodata if src.nodata is not None else fallback_nodata
+            epsg = src.crs.to_epsg() if src.crs else None
+            native_res = (float(src.res[0]), float(src.res[1]))
+
             profile = src.profile.copy()
             profile.update(
                 driver="GTiff",
@@ -100,14 +115,24 @@ def download_cog_window_for_aoi(
                 blockxsize=min(256, max(16, (width // 16) * 16)),
                 blockysize=min(256, max(16, (height // 16) * 16)),
             )
+            if effective_nodata is not None:
+                profile["nodata"] = effective_nodata
+
             with rasterio.open(tmp_path, "w", **profile) as dst:
                 dst.write(data)
+                for idx, desc in enumerate(src_descriptions, start=1):
+                    if desc and idx <= src.count:
+                        dst.set_band_description(idx, desc)
 
-        actual_bytes = tmp_path.stat().st_size
+        # Verify written temporary GeoTIFF integrity before committing atomically
+        with rasterio.open(tmp_path) as verify_ds:
+            if verify_ds.width != width or verify_ds.height != height or verify_ds.count != data.shape[0]:
+                raise RuntimeError("Downloaded GeoTIFF failed structural dimension verification")
+
+        actual_bytes = int(tmp_path.stat().st_size)
         validate_file_size(actual_bytes, max_mb=max_download_mb)
         tmp_path.replace(target_path)
         checksum = sha256_file(target_path)
-        epsg = src.crs.to_epsg() if src.crs else None
         logger.info("Downloaded windowed COG %s (%.2f MB)", target_path.name, actual_bytes / (1024**2))
         return ClippedDownloadResult(
             local_path=target_path,
@@ -115,11 +140,20 @@ def download_cog_window_for_aoi(
             crs_epsg=int(epsg) if epsg else None,
             width=width,
             height=height,
-            count=data.shape[0],
+            count=int(data.shape[0]),
             size_mb=round(actual_bytes / (1024**2), 4),
-            nodata=src.nodata,
+            size_bytes=actual_bytes,
+            nodata=effective_nodata,
+            dtype=dtype_str,
+            native_resolution=native_res,
+            band_descriptions=src_descriptions,
         )
-    except (StorageLimitError, Exception):
+    except (StorageLimitError, UnsafePathError, ValueError):
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
         raise
+    except Exception as exc:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        sanitized = scrub_secrets_from_text(str(exc))
+        raise RuntimeError(sanitized) from exc

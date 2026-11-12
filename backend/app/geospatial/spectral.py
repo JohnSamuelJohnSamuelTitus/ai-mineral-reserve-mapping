@@ -167,10 +167,9 @@ def compute_sentinel2_features(
         )
         docs.append(SENTINEL2_FEATURE_REGISTRY["s2_iron_oxide_ratio"].__dict__)
 
-    nir_band = bands.get("B8A") if "B8A" in bands else bands.get("B08")
-    if "B12" in bands and nir_band is not None:
+    if "B12" in bands and "B8A" in bands:
         features["s2_ferrous_iron_ratio"] = safe_band_ratio(
-            bands["B12"], nir_band, valid_mask=valid, nodata=nodata
+            bands["B12"], bands["B8A"], valid_mask=valid, nodata=nodata
         )
         docs.append(SENTINEL2_FEATURE_REGISTRY["s2_ferrous_iron_ratio"].__dict__)
 

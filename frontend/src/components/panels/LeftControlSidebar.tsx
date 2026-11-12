@@ -554,31 +554,43 @@ export const LeftControlSidebar: React.FC<LeftControlSidebarProps> = ({
                     <p className="empty-state">No STAC scenes stored for this AOI yet.</p>
                   ) : (
                     <ul className="raster-list">
-                      {rasters.slice(0, 8).map((r) => (
-                        <li key={r.id} className="raster-row">
-                          <div className="raster-title">
-                            <strong>{r.stac_item_id}</strong>
-                            <span className="pill">{r.stac_collection || r.asset_type}</span>
-                          </div>
-                          <div className="raster-meta">
-                            <span>Status: {r.download_status}</span>
-                            <span>
-                              Est: {r.estimated_size_mb !== null ? `${r.estimated_size_mb} MB` : 'N/A'}
-                            </span>
-                            {r.requires_auth && <span className="warn-tag">Auth Required</span>}
-                          </div>
-                          {r.download_status !== 'downloaded' && (
-                            <button
-                              type="button"
-                              className="btn-xs"
-                              disabled={Boolean(busyAction)}
-                              onClick={() => onDownloadAsset(r.id)}
-                            >
-                              Clip &amp; Download Window
-                            </button>
-                          )}
-                        </li>
-                      ))}
+                      {rasters.slice(0, 12).map((r) => {
+                        const dlBands = Object.keys(r.downloaded_bands || {});
+                        return (
+                          <li key={r.id} className="raster-row">
+                            <div className="raster-title">
+                              <strong>{r.stac_item_id}</strong>
+                              <span className="pill">{r.stac_collection || r.asset_type}</span>
+                            </div>
+                            <div className="raster-meta">
+                              <span>Status: {r.download_status}</span>
+                              <span>
+                                Est: {r.estimated_size_mb !== null ? `${r.estimated_size_mb} MB` : 'N/A'}
+                              </span>
+                              {r.crs_epsg && <span>EPSG:{r.crs_epsg}</span>}
+                              {r.requires_auth && <span className="warn-tag">Auth Required</span>}
+                            </div>
+                            {dlBands.length > 0 && (
+                              <div className="small-note">
+                                Bands: {dlBands.join(', ')}
+                                {r.checksum_sha256 ? ` · SHA256:${r.checksum_sha256.slice(0, 8)}` : ''}
+                              </div>
+                            )}
+                            {r.download_status !== 'downloaded' && (
+                              <button
+                                type="button"
+                                className="btn-xs"
+                                disabled={Boolean(busyAction)}
+                                onClick={() => onDownloadAsset(r.id)}
+                              >
+                                {r.download_status === 'partial'
+                                  ? 'Resume Band Download'
+                                  : 'Clip & Download Window'}
+                              </button>
+                            )}
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
                 </section>

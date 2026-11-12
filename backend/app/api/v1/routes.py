@@ -25,6 +25,7 @@ from app.api.v1.schemas import (
     IngestionRunRequest,
     IngestionRunResponse,
     MineralOccurrenceResponse,
+    ProcessingJobResponse,
     RasterAssetResponse,
 )
 from app.core.cache import CacheBackend, InMemoryTTLCache
@@ -38,6 +39,7 @@ from app.db.repositories import (
     IngestionJobRepository,
     LicenseViolationError,
     MineralOccurrenceRepository,
+    ProcessingJobRepository,
     RasterAssetRepository,
 )
 from app.db.session import get_db
@@ -457,4 +459,55 @@ async def lookup_point_elevation(
         return pts[0].model_dump()
     except ProviderError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
+@router.get("/jobs/{job_id}", response_model=ProcessingJobResponse, tags=["jobs"])
+def get_processing_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+) -> ProcessingJobResponse:
+    job = ProcessingJobRepository(db).get(job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Processing job not found")
+    return ProcessingJobResponse(
+        id=job.id,
+        aoi_id=job.aoi_id,
+        job_type=job.job_type,
+        status=job.status,
+        progress_pct=job.progress_pct,
+        parameters_json=job.parameters_json or {},
+        result_summary_json=job.result_summary_json or {},
+        error_message=job.error_message,
+        started_at=job.started_at,
+        finished_at=job.finished_at,
+    )
+
+
+@router.post("/jobs/{job_id}/cancel", response_model=ProcessingJobResponse, tags=["jobs"])
+def cancel_processing_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+) -> ProcessingJobResponse:
+    repo = ProcessingJobRepository(db)
+    job = repo.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Processing job not found")
+    if job.status in {"completed", "failed", "cancelled"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Job already in terminal state '{job.status}'",
+        )
+    job = repo.cancel(job)
+    return ProcessingJobResponse(
+        id=job.id,
+        aoi_id=job.aoi_id,
+        job_type=job.job_type,
+        status=job.status,
+        progress_pct=job.progress_pct,
+        parameters_json=job.parameters_json or {},
+        result_summary_json=job.result_summary_json or {},
+        error_message=job.error_message,
+        started_at=job.started_at,
+        finished_at=job.finished_at,
+    )
 

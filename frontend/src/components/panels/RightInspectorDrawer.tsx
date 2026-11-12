@@ -235,6 +235,37 @@ export const RightInspectorDrawer: React.FC<RightInspectorDrawerProps> = ({
                     CRS: EPSG:{latestManifest.target_crs_epsg} · Grid {latestManifest.grid_rows}×
                     {latestManifest.grid_cols} @ {latestManifest.resolution_m}m
                   </p>
+                  {Array.isArray(latestManifest.manifest_json?.dem_source_tile_ids) &&
+                    latestManifest.manifest_json.dem_source_tile_ids.length > 0 && (
+                      <p className="small-note" data-testid="dem-provenance">
+                        DEM Tiles: {latestManifest.manifest_json.dem_source_tile_ids.join(', ')}
+                        {typeof latestManifest.manifest_json.dem_coverage_pct === 'number'
+                          ? ` (${latestManifest.manifest_json.dem_coverage_pct}% AOI coverage)`
+                          : ''}
+                      </p>
+                    )}
+                  {Array.isArray(latestManifest.manifest_json?.spectral_sensors) &&
+                    latestManifest.manifest_json.spectral_sensors.length > 0 && (
+                      <p className="small-note">
+                        Spectral Sensors: {latestManifest.manifest_json.spectral_sensors.join(', ')}
+                      </p>
+                    )}
+                  {latestManifest.manifest_json?.aster_band_mapping &&
+                    Object.keys(latestManifest.manifest_json.aster_band_mapping).length > 0 && (
+                      <p className="small-note" data-testid="aster-mapping-provenance">
+                        ASTER Bands Mapped:{' '}
+                        {Object.keys(latestManifest.manifest_json.aster_band_mapping).join(', ')}
+                      </p>
+                    )}
+                  {latestManifest.warnings_json && latestManifest.warnings_json.length > 0 && (
+                    <ul className="warning-list">
+                      {latestManifest.warnings_json.slice(0, 4).map((w, idx) => (
+                        <li key={idx} className="warn-item">
+                          {w}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                   <div className="table-scroll">
                     <table className="stats-table">
                       <thead>

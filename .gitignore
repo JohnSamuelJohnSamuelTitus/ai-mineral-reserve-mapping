@@ -37,6 +37,10 @@ data/raw/
 data/interim/
 data/processed/
 data/cache/
+data/rasters/
+data/features/
+data/ml_datasets/
+data/uploads/
 *.tif
 *.tiff
 *.geotiff

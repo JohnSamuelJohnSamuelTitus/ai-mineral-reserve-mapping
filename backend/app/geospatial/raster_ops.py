@@ -8,8 +8,11 @@ from typing import Any
 
 import numpy as np
 import rasterio
+from rasterio.merge import merge as rasterio_merge
 from rasterio.transform import Affine, from_origin
 from rasterio.warp import Resampling, calculate_default_transform, reproject, transform_bounds
+
+from app.storage.manager import managed_temp_dir
 
 DEFAULT_NODATA = -9999.0
 
@@ -156,20 +159,194 @@ def align_raster_band_to_grid(
     band_index: int = 1,
     grid: TargetGridSpec,
     resampling: Resampling = Resampling.bilinear,
+    nodata_override: float | None = None,
 ) -> np.ndarray:
     """Open a local GeoTIFF and reproject the chosen band into the canonical AOI grid."""
     with rasterio.open(raster_path) as src:
         if src.crs is None:
             raise ValueError(f"Raster '{raster_path.name}' lacks CRS metadata")
         arr = src.read(band_index)
+        effective_nodata = src.nodata if src.nodata is not None else nodata_override
         return reproject_array_to_grid(
             source_array=arr,
             src_transform=src.transform,
             src_crs=src.crs,
-            src_nodata=src.nodata,
+            src_nodata=effective_nodata,
             grid=grid,
             resampling=resampling,
         )
+
+
+@dataclass(frozen=True)
+class MosaicResult:
+    """Result metadata from bounded DEM cross-tile mosaicking."""
+
+    mosaic_path: Path
+    source_crs_epsg: int | None
+    native_resolution: tuple[float, float]
+    tile_count: int
+    reprojected_tile_count: int
+    width: int
+    height: int
+    nodata: float
+    warnings: list[str]
+
+
+def mosaic_compatible_dem_tiles(
+    *,
+    tile_paths: list[Path],
+    output_path: Path,
+    aoi_bbox_wgs84: tuple[float, float, float, float] | None = None,
+    nodata: float = DEFAULT_NODATA,
+    max_resolution_ratio: float = 2.5,
+) -> MosaicResult:
+    """Validate, optionally align CRS, mosaic compatible DEM tiles, and clip to AOI bounds.
+
+    Never fabricates or interpolates elevations into areas not covered by valid tile pixels.
+    """
+    if not tile_paths:
+        raise ValueError("At least one DEM tile path is required for mosaicking.")
+
+    metas: list[dict[str, Any]] = []
+    for p in tile_paths:
+        if not p.exists():
+            raise FileNotFoundError(f"DEM tile missing on disk: {p}")
+        with rasterio.open(p) as src:
+            if src.crs is None:
+                raise ValueError(f"DEM tile '{p.name}' lacks CRS metadata.")
+            metas.append(
+                {
+                    "path": p,
+                    "crs": src.crs,
+                    "epsg": src.crs.to_epsg(),
+                    "res_x": abs(float(src.res[0])),
+                    "res_y": abs(float(src.res[1])),
+                    "bounds": src.bounds,
+                    "nodata": src.nodata,
+                }
+            )
+
+    primary_crs = metas[0]["crs"]
+    primary_epsg = metas[0]["epsg"]
+    warnings: list[str] = []
+    reprojected_count = 0
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_mosaic_path = output_path.with_suffix(".tif.tmp")
+    if tmp_mosaic_path.exists():
+        tmp_mosaic_path.unlink(missing_ok=True)
+
+    with managed_temp_dir("dem_mosaic_") as tmpdir:
+        merge_sources: list[Path] = []
+        norm_res_list: list[tuple[float, float]] = []
+
+        for idx, meta in enumerate(metas):
+            tile_path: Path = meta["path"]
+            if meta["crs"] != primary_crs:
+                if primary_epsg is None:
+                    raise ValueError(
+                        f"Cannot harmonize mixed CRSs across DEM tiles without primary EPSG ({meta['crs']})."
+                    )
+                reproj_path = tmpdir / f"reproj_{idx}_{tile_path.name}"
+                reproject_raster_to_utm(
+                    src_path=tile_path,
+                    dst_path=reproj_path,
+                    dst_epsg=int(primary_epsg),
+                    resampling=Resampling.bilinear,
+                )
+                with rasterio.open(reproj_path) as rds:
+                    norm_res_list.append((abs(float(rds.res[0])), abs(float(rds.res[1]))))
+                merge_sources.append(reproj_path)
+                reprojected_count += 1
+            else:
+                norm_res_list.append((meta["res_x"], meta["res_y"]))
+                merge_sources.append(tile_path)
+
+        if reprojected_count > 0:
+            warnings.append(
+                f"Reprojected {reprojected_count} DEM tile(s) to match primary CRS ({primary_crs}) before mosaicking."
+            )
+
+        # Validate spatial resolution compatibility across tiles
+        xs = [r[0] for r in norm_res_list if r[0] > 0]
+        ys = [r[1] for r in norm_res_list if r[1] > 0]
+        if not xs or not ys:
+            raise ValueError("Invalid zero pixel resolution detected in DEM tile(s).")
+        if (max(xs) / min(xs) > max_resolution_ratio) or (max(ys) / min(ys) > max_resolution_ratio):
+            raise ValueError(
+                f"Incompatible DEM pixel resolutions across tiles ({norm_res_list}); refusing mosaic."
+            )
+
+        # Normalize per-tile nodata into tmp float32 inputs so None nodata / NaNs never turn into zeros
+        clean_inputs: list[Path] = []
+        for idx, src_p in enumerate(merge_sources):
+            with rasterio.open(src_p) as src:
+                arr = src.read(1).astype(np.float32)
+                if src.nodata is not None:
+                    arr = np.where(arr == src.nodata, nodata, arr)
+                arr = np.where(np.isfinite(arr), arr, nodata).astype(np.float32)
+                clean_p = tmpdir / f"clean_{idx}.tif"
+                prof = src.profile.copy()
+                prof.update(
+                    driver="GTiff",
+                    count=1,
+                    dtype="float32",
+                    nodata=nodata,
+                    compress="deflate",
+                )
+                with rasterio.open(clean_p, "w", **prof) as dst:
+                    dst.write(arr, 1)
+                clean_inputs.append(clean_p)
+
+        clip_bounds: tuple[float, float, float, float] | None = None
+        if aoi_bbox_wgs84 is not None:
+            minx, miny, maxx, maxy = transform_bounds(
+                "EPSG:4326", primary_crs, *aoi_bbox_wgs84, densify_pts=21
+            )
+            pad_x = max(xs) * 2.0
+            pad_y = max(ys) * 2.0
+            clip_bounds = (minx - pad_x, miny - pad_y, maxx + pad_x, maxy + pad_y)
+
+        opened = [rasterio.open(p) for p in clean_inputs]
+        try:
+            mosaic_arr, mosaic_transform = rasterio_merge(
+                opened,
+                bounds=clip_bounds,
+                nodata=nodata,
+                resampling=Resampling.bilinear,
+            )
+            out_profile = opened[0].profile.copy()
+        finally:
+            for ds in opened:
+                ds.close()
+
+        out_h, out_w = mosaic_arr.shape[1], mosaic_arr.shape[2]
+        out_profile.update(
+            driver="GTiff",
+            height=out_h,
+            width=out_w,
+            count=1,
+            dtype="float32",
+            transform=mosaic_transform,
+            crs=primary_crs,
+            nodata=nodata,
+            compress="deflate",
+        )
+        with rasterio.open(tmp_mosaic_path, "w", **out_profile) as dst:
+            dst.write(mosaic_arr[0].astype(np.float32), 1)
+        tmp_mosaic_path.replace(output_path)
+
+    return MosaicResult(
+        mosaic_path=output_path,
+        source_crs_epsg=int(primary_epsg) if primary_epsg else None,
+        native_resolution=(float(min(xs)), float(min(ys))),
+        tile_count=len(tile_paths),
+        reprojected_tile_count=reprojected_count,
+        width=int(out_w),
+        height=int(out_h),
+        nodata=float(nodata),
+        warnings=warnings,
+    )
 
 
 def reproject_raster_to_utm(

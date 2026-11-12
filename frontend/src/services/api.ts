@@ -9,6 +9,7 @@ import type {
   GeologicalUnitItem,
   GIBSLayerItem,
   HealthStatus,
+  IngestionRunResult,
   MineralOccurrenceItem,
   MLDatasetVersionItem,
   ProcessingJobItem,
@@ -82,7 +83,7 @@ export const apiClient = {
     aoiId: string,
     providers: ('usgs_mrds' | 'macrostrat_v2' | 'sentinel2_stac')[] = ['macrostrat_v2', 'usgs_mrds']
   ) =>
-    apiJson<{ aoi_id: string; results: Record<string, unknown>[] }>(`/api/v1/aois/${aoiId}/ingest`, {
+    apiJson<IngestionRunResult>(`/api/v1/ingestion/aois/${aoiId}/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ providers }),
@@ -133,17 +134,35 @@ export const apiClient = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
-  downloadRasterAsset: (assetId: string, aoiId: string, bandKey?: string) => {
-    const params = new URLSearchParams({ aoi_id: aoiId, run_sync: 'true' });
-    if (bandKey) params.set('band_key', bandKey);
-    return apiJson<ProcessingJobItem>(`/api/v1/satellite/assets/${assetId}/download?${params.toString()}`, {
-      method: 'POST',
-    });
+  downloadRasterAsset: (assetId: string, bandKey: string = 'auto') => {
+    const params = new URLSearchParams({ band_key: bandKey });
+    return apiJson<ProcessingJobItem>(
+      `/api/v1/satellite/scenes/${assetId}/download-clipped?${params.toString()}`,
+      {
+        method: 'POST',
+      }
+    );
   },
+
+  getJob: (jobId: string) => apiJson<ProcessingJobItem>(`/api/v1/jobs/${jobId}`),
+  cancelJob: (jobId: string) =>
+    apiJson<ProcessingJobItem>(`/api/v1/jobs/${jobId}/cancel`, {
+      method: 'POST',
+    }),
 
   extractFeatures: (
     aoiId: string,
-    payload: { resolution_m: number; dem_asset_id?: string | null; include_geology: boolean; run_sync: boolean }
+    payload: {
+      resolution_m: number;
+      dem_asset_id?: string | null;
+      dem_asset_ids?: string[] | null;
+      sentinel_asset_id?: string | null;
+      aster_asset_id?: string | null;
+      include_geology: boolean;
+      include_sentinel2?: boolean;
+      include_aster?: boolean;
+      run_sync: boolean;
+    }
   ) =>
     apiJson<ProcessingJobItem>(`/api/v1/features/aois/${aoiId}/extract`, {
       method: 'POST',

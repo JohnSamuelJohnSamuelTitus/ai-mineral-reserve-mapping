@@ -24,6 +24,7 @@ from app.db.repositories import (
     MineralOccurrenceRepository,
     RasterAssetRepository,
 )
+from app.geological.normalizer import COMMODITY_SYNONYMS
 from app.integrations.base import ProviderError
 from app.integrations.india_sources import (
     load_indian_official_csv,
@@ -32,6 +33,7 @@ from app.integrations.india_sources import (
 from app.integrations.macrostrat import MacrostratAdapter
 from app.integrations.stac import SentinelSTACWithFallback, STACSearchAdapter
 from app.integrations.usgs_mrds import USGSMRDSAdapter
+from app.storage.manager import sanitize_url_for_storage
 
 logger = get_logger(__name__)
 
@@ -81,14 +83,26 @@ class IngestionPipeline:
             for rec in raw_records:
                 if not aoi_poly.intersects(Point(rec.lon, rec.lat)):
                     continue
+                normalized_commods: list[str] = []
+                for token in rec.commodities_all:
+                    canon = COMMODITY_SYNONYMS.get(token.strip().lower(), token.strip())
+                    if canon and canon not in normalized_commods:
+                        normalized_commods.append(canon)
+                primary = (
+                    COMMODITY_SYNONYMS.get(
+                        rec.commodity_primary.strip().lower(), rec.commodity_primary.strip()
+                    )
+                    if rec.commodity_primary
+                    else (normalized_commods[0] if normalized_commods else None)
+                )
                 to_save.append(
                     MineralOccurrence(
                         source_id=source.id,
                         aoi_id=aoi.id,
                         external_id=rec.external_id,
                         name=rec.name,
-                        commodity_primary=rec.commodity_primary,
-                        commodities_all=rec.commodities_all,
+                        commodity_primary=primary,
+                        commodities_all=normalized_commods,
                         occurrence_type=rec.occurrence_type,
                         deposit_type=rec.deposit_type,
                         jurisdiction=aoi.jurisdiction,
@@ -111,6 +125,7 @@ class IngestionPipeline:
                 details={"fetched_bbox_count": len(raw_records), "in_aoi_count": len(to_save)},
             )
             return {
+                "job_id": job.id,
                 "provider_key": provider_key,
                 "status": "completed",
                 "records_written": written,
@@ -121,6 +136,7 @@ class IngestionPipeline:
             self.sources.update_health(provider_key, f"error: {type(exc).__name__}")
             self.jobs.fail(job, error_message=str(exc))
             return {
+                "job_id": job.id,
                 "provider_key": provider_key,
                 "status": "failed",
                 "records_written": 0,
@@ -181,6 +197,7 @@ class IngestionPipeline:
             self.sources.update_health(provider_key, "ok")
             self.jobs.complete(job, records_written=written, details={"fetched": len(fetched)})
             return {
+                "job_id": job.id,
                 "provider_key": provider_key,
                 "status": "completed",
                 "records_written": written,
@@ -191,6 +208,7 @@ class IngestionPipeline:
             self.sources.update_health(provider_key, f"error: {type(exc).__name__}")
             self.jobs.fail(job, error_message=str(exc))
             return {
+                "job_id": job.id,
                 "provider_key": provider_key,
                 "status": "failed",
                 "records_written": 0,
@@ -222,11 +240,14 @@ class IngestionPipeline:
             now = datetime.now(UTC)
             to_save: list[RasterAsset] = []
             for scene in scenes:
-                storage_uri = (
-                    scene.asset_hrefs.get("visual")
-                    or scene.asset_hrefs.get("B04")
-                    or scene.asset_hrefs.get("red")
-                    or next(iter(scene.asset_hrefs.values()), f"stac://{scene.collection}/{scene.item_id}")
+                clean_hrefs = {
+                    k: sanitize_url_for_storage(v) for k, v in scene.asset_hrefs.items()
+                }
+                storage_uri = sanitize_url_for_storage(
+                    clean_hrefs.get("visual")
+                    or clean_hrefs.get("B04")
+                    or clean_hrefs.get("red")
+                    or next(iter(clean_hrefs.values()), f"stac://{scene.collection}/{scene.item_id}")
                 )
                 to_save.append(
                     RasterAsset(
@@ -234,7 +255,7 @@ class IngestionPipeline:
                         source_id=source.id,
                         stac_collection=scene.collection,
                         stac_item_id=scene.item_id,
-                        asset_type="sentinel2_l2a_stac_item",
+                        asset_type=scene.product_type or "sentinel2_l2a_stac_item",
                         platform=scene.platform,
                         product_type=scene.product_type,
                         acquired_at=scene.acquired_at,
@@ -251,8 +272,9 @@ class IngestionPipeline:
                         estimated_size_mb=scene.estimated_size_mb,
                         bands_available=scene.bands_available,
                         band_metadata={
-                            "assets": sorted(scene.asset_hrefs.keys()),
-                            "asset_hrefs": scene.asset_hrefs,
+                            "assets": sorted(clean_hrefs.keys()),
+                            "asset_hrefs": clean_hrefs,
+                            "asset_info": getattr(scene, "asset_info", {}),
                             "auth_note": scene.auth_note,
                         },
                         data_origin="real",
@@ -267,6 +289,7 @@ class IngestionPipeline:
                 details={"provider_used": used_provider, "scenes_found": len(scenes)},
             )
             return {
+                "job_id": job.id,
                 "provider_key": used_provider,
                 "status": "completed",
                 "records_written": written,
@@ -277,6 +300,7 @@ class IngestionPipeline:
             self.sources.update_health("mpc_stac", f"error: {type(exc).__name__}")
             self.jobs.fail(job, error_message=str(exc))
             return {
+                "job_id": job.id,
                 "provider_key": "mpc_stac",
                 "status": "failed",
                 "records_written": 0,

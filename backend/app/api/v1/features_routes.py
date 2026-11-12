@@ -68,26 +68,41 @@ def _execute_feature_job_with_session(
     aoi_id: str,
     resolution_m: float,
     dem_asset_id: str | None,
+    dem_asset_ids: list[str] | None,
+    sentinel_asset_id: str | None,
+    aster_asset_id: str | None,
     include_geology: bool,
+    include_sentinel2: bool,
+    include_aster: bool,
     settings: Settings,
 ) -> None:
     job_repo = ProcessingJobRepository(db)
     job = job_repo.get(job_id)
-    if job is None:
+    if job is None or job.status == "cancelled":
         return
     try:
         job_repo.mark_running(job, progress_pct=20)
         aoi = AOIRepository(db).get(aoi_id)
         if aoi is None:
             raise ValueError(f"AOI '{aoi_id}' not found")
+        if job_repo.is_cancelled(job_id):
+            return
         outcome = extract_aoi_features(
             db=db,
             aoi=aoi,
             settings=settings,
             resolution_m=resolution_m,
             dem_asset_id=dem_asset_id,
+            dem_asset_ids=dem_asset_ids,
+            sentinel_asset_id=sentinel_asset_id,
+            aster_asset_id=aster_asset_id,
             include_geology=include_geology,
+            include_sentinel2=include_sentinel2,
+            include_aster=include_aster,
         )
+        if job_repo.is_cancelled(job_id):
+            return
+        meta_json = outcome.manifest.metadata_json or {}
         job_repo.complete(
             job,
             summary={
@@ -97,6 +112,9 @@ def _execute_feature_job_with_session(
                 "grid_cols": outcome.manifest.grid_cols,
                 "resolution_m": outcome.manifest.resolution_m,
                 "warnings_count": len(outcome.manifest.warnings_json or []),
+                "dem_source_tile_ids": meta_json.get("dem_source_tile_ids", []),
+                "dem_coverage_pct": meta_json.get("dem_coverage_pct"),
+                "aster_band_mapping": meta_json.get("aster_band_mapping", {}),
                 "feature_stats": outcome.feature_stats,
             },
         )
@@ -110,7 +128,12 @@ def _run_feature_extraction_job(
     aoi_id: str,
     resolution_m: float,
     dem_asset_id: str | None,
+    dem_asset_ids: list[str] | None,
+    sentinel_asset_id: str | None,
+    aster_asset_id: str | None,
     include_geology: bool,
+    include_sentinel2: bool,
+    include_aster: bool,
     settings: Settings,
 ) -> None:
     db = session_factory()
@@ -121,7 +144,12 @@ def _run_feature_extraction_job(
             aoi_id=aoi_id,
             resolution_m=resolution_m,
             dem_asset_id=dem_asset_id,
+            dem_asset_ids=dem_asset_ids,
+            sentinel_asset_id=sentinel_asset_id,
+            aster_asset_id=aster_asset_id,
             include_geology=include_geology,
+            include_sentinel2=include_sentinel2,
+            include_aster=include_aster,
             settings=settings,
         )
     finally:
@@ -250,7 +278,12 @@ def trigger_aoi_feature_extraction(
             aoi_id=aoi.id,
             resolution_m=payload.resolution_m,
             dem_asset_id=payload.dem_asset_id,
+            dem_asset_ids=payload.dem_asset_ids,
+            sentinel_asset_id=payload.sentinel_asset_id,
+            aster_asset_id=payload.aster_asset_id,
             include_geology=payload.include_geology,
+            include_sentinel2=payload.include_sentinel2,
+            include_aster=payload.include_aster,
             settings=settings,
         )
         refreshed = job_repo.get(job.id)
@@ -271,7 +304,12 @@ def trigger_aoi_feature_extraction(
             aoi.id,
             payload.resolution_m,
             payload.dem_asset_id,
+            payload.dem_asset_ids,
+            payload.sentinel_asset_id,
+            payload.aster_asset_id,
             payload.include_geology,
+            payload.include_sentinel2,
+            payload.include_aster,
             settings,
         )
 

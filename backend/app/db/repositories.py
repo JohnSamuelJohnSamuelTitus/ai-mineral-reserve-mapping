@@ -319,7 +319,13 @@ class RasterAssetRepository:
                 existing.requires_auth = asset.requires_auth
                 existing.estimated_size_mb = asset.estimated_size_mb or existing.estimated_size_mb
                 existing.bands_available = asset.bands_available or existing.bands_available
-                existing.band_metadata = asset.band_metadata
+                merged_meta = dict(existing.band_metadata or {})
+                merged_meta.update(asset.band_metadata or {})
+                if (existing.band_metadata or {}).get("downloaded_bands") and not (
+                    (asset.band_metadata or {}).get("downloaded_bands")
+                ):
+                    merged_meta["downloaded_bands"] = existing.band_metadata["downloaded_bands"]
+                existing.band_metadata = merged_meta
         self._db.commit()
         return written
 
@@ -333,10 +339,46 @@ class RasterAssetRepository:
         local_path: str,
         checksum_sha256: str,
         crs_epsg: int | None = None,
+        band_metadata: dict | None = None,
+        download_status: str = "downloaded",
     ) -> RasterAsset:
         asset.local_path = local_path
         asset.checksum_sha256 = checksum_sha256
-        asset.download_status = "downloaded"
+        asset.download_status = download_status
+        if crs_epsg is not None:
+            asset.crs_epsg = crs_epsg
+        if band_metadata is not None:
+            existing = dict(asset.band_metadata or {})
+            if "downloaded_bands" in band_metadata and isinstance(band_metadata["downloaded_bands"], dict):
+                merged_bands = dict(existing.get("downloaded_bands") or {})
+                merged_bands.update(band_metadata["downloaded_bands"])
+                existing.update(band_metadata)
+                existing["downloaded_bands"] = merged_bands
+            else:
+                existing.update(band_metadata)
+            asset.band_metadata = existing
+        self._db.commit()
+        self._db.refresh(asset)
+        return asset
+
+    def mark_bands_downloaded(
+        self,
+        asset: RasterAsset,
+        *,
+        downloaded_bands: dict[str, dict],
+        primary_local_path: str,
+        primary_checksum_sha256: str,
+        crs_epsg: int | None = None,
+        download_status: str = "downloaded",
+    ) -> RasterAsset:
+        existing = dict(asset.band_metadata or {})
+        merged_bands = dict(existing.get("downloaded_bands") or {})
+        merged_bands.update(downloaded_bands)
+        existing["downloaded_bands"] = merged_bands
+        asset.band_metadata = existing
+        asset.local_path = primary_local_path
+        asset.checksum_sha256 = primary_checksum_sha256
+        asset.download_status = download_status
         if crs_epsg is not None:
             asset.crs_epsg = crs_epsg
         self._db.commit()
@@ -465,6 +507,20 @@ class ProcessingJobRepository:
         self._db.refresh(job)
         return job
 
+    def update_progress(
+        self,
+        job: ProcessingJob,
+        *,
+        progress_pct: int,
+        summary: dict | None = None,
+    ) -> ProcessingJob:
+        job.progress_pct = max(0, min(100, int(progress_pct)))
+        if summary is not None:
+            job.result_summary_json = summary
+        self._db.commit()
+        self._db.refresh(job)
+        return job
+
     def complete(self, job: ProcessingJob, *, summary: dict) -> ProcessingJob:
         job.status = "completed"
         job.progress_pct = 100
@@ -481,6 +537,19 @@ class ProcessingJobRepository:
         self._db.commit()
         self._db.refresh(job)
         return job
+
+    def cancel(self, job: ProcessingJob, *, reason: str = "Cancelled by user") -> ProcessingJob:
+        job.status = "cancelled"
+        job.error_message = reason[:2000]
+        job.finished_at = datetime.now(UTC)
+        self._db.commit()
+        self._db.refresh(job)
+        return job
+
+    def is_cancelled(self, job_id: str) -> bool:
+        self._db.expire_all()
+        job = self._db.get(ProcessingJob, job_id)
+        return job is not None and job.status == "cancelled"
 
     def list_for_aoi(self, aoi_id: str | None = None, *, limit: int = 50) -> list[ProcessingJob]:
         stmt = select(ProcessingJob).order_by(ProcessingJob.started_at.desc()).limit(limit)

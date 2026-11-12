@@ -24,6 +24,7 @@ import type {
   LayerKey,
   MineralOccurrenceItem,
   MLDatasetVersionItem,
+  ProcessingJobItem,
   RasterAssetItem,
 } from './types/gis';
 
@@ -69,8 +70,43 @@ export function App(): React.ReactElement {
 
   const [initialLoading, setInitialLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [activeJob, setActiveJob] = useState<ProcessingJobItem | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const pollJobUntilTerminal = useCallback(
+    async (initialJob: ProcessingJobItem, label: string): Promise<ProcessingJobItem> => {
+      let current = initialJob;
+      setActiveJob(current);
+      while (current.status === 'pending' || current.status === 'running') {
+        const lastBand =
+          typeof current.result_summary_json?.last_band === 'string'
+            ? ` · band ${current.result_summary_json.last_band}`
+            : '';
+        setStatusMessage(`${label} (${current.progress_pct}%${lastBand})...`);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        current = await apiClient.getJob(current.id);
+        setActiveJob(current);
+      }
+      setActiveJob(null);
+      if (current.status === 'failed') {
+        throw new Error(current.error_message || `${label} failed`);
+      }
+      return current;
+    },
+    []
+  );
+
+  const handleCancelActiveJob = async () => {
+    if (!activeJob) return;
+    try {
+      const updated = await apiClient.cancelJob(activeJob.id);
+      setActiveJob(updated);
+      setStatusMessage(`Cancelling job ${activeJob.id}...`);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to cancel job');
+    }
+  };
 
   const loadAoiContext = useCallback(async (aoi: AOIItem) => {
     setErrorMessage(null);
@@ -314,6 +350,11 @@ export function App(): React.ReactElement {
               ? 'Loading geospatial workspace...'
               : errorMessage || statusMessage}
           </span>
+          {activeJob && (activeJob.status === 'pending' || activeJob.status === 'running') && (
+            <button type="button" className="btn-xs" onClick={() => void handleCancelActiveJob()}>
+              Cancel Job ({activeJob.progress_pct}%)
+            </button>
+          )}
           {errorMessage && (
             <button type="button" className="btn-xs" onClick={() => void bootstrap()}>
               Retry
@@ -359,9 +400,27 @@ export function App(): React.ReactElement {
           onRunIngestion={async () => {
             if (!activeAoi) return;
             await withBusy('Ingesting Macrostrat & USGS MRDS', async () => {
-              await apiClient.runIngestion(activeAoi.id);
+              const res = await apiClient.runIngestion(activeAoi.id);
               await loadAoiContext(activeAoi);
-              setStatusMessage('Ingestion completed.');
+              const failed = (res.results || []).filter(
+                (r) => Boolean(r.error) || r.status === 'failed'
+              );
+              const totalWritten = (res.results || []).reduce(
+                (acc, r) => acc + (r.records_written || 0),
+                0
+              );
+              if (failed.length > 0) {
+                const msg = failed
+                  .map((f) => `${f.provider_key}: ${f.error || f.status}`)
+                  .join(' | ');
+                setErrorMessage(`Partial/failed ingestion (${totalWritten} written) — ${msg}`);
+                setStatusMessage(null);
+              } else {
+                const detail = (res.results || [])
+                  .map((r) => `${r.provider_key}:${r.records_written}`)
+                  .join(', ');
+                setStatusMessage(`Ingestion completed (${detail}).`);
+              }
             });
           }}
           onImportGeologicalFile={async (file, providerKey, inputEpsg) => {
@@ -408,21 +467,48 @@ export function App(): React.ReactElement {
           onDownloadAsset={async (assetId) => {
             if (!activeAoi) return;
             await withBusy('Downloading clipped AOI window', async () => {
-              await apiClient.downloadRasterAsset(assetId, activeAoi.id);
+              const job = await apiClient.downloadRasterAsset(assetId, 'auto');
+              const finalJob = await pollJobUntilTerminal(job, 'Clipping & downloading AOI window');
               await loadAoiContext(activeAoi);
-              setStatusMessage('Clipped COG downloaded and verified.');
+              if (finalJob.status === 'cancelled') {
+                setStatusMessage('Raster download job was cancelled.');
+                return;
+              }
+              const bandCount = finalJob.result_summary_json?.band_count_downloaded;
+              setStatusMessage(
+                bandCount
+                  ? `Clipped COG downloaded & verified (${String(bandCount)} band groups).`
+                  : 'Clipped COG downloaded and verified.'
+              );
             });
           }}
           onExtractFeatures={async (resolutionM, includeGeology) => {
             if (!activeAoi) return;
             await withBusy(`Extracting ${resolutionM}m projected features`, async () => {
-              await apiClient.extractFeatures(activeAoi.id, {
+              const job = await apiClient.extractFeatures(activeAoi.id, {
                 resolution_m: resolutionM,
                 include_geology: includeGeology,
-                run_sync: true,
+                include_sentinel2: true,
+                include_aster: true,
+                run_sync: false,
               });
+              const finalJob = await pollJobUntilTerminal(
+                job,
+                `Extracting ${resolutionM}m projected features`
+              );
               await loadAoiContext(activeAoi);
-              setStatusMessage('Feature stack extracted and manifest saved.');
+              if (finalJob.status === 'cancelled') {
+                setStatusMessage('Feature extraction job was cancelled.');
+                return;
+              }
+              const featCount = Array.isArray(finalJob.result_summary_json?.feature_names)
+                ? finalJob.result_summary_json.feature_names.length
+                : undefined;
+              setStatusMessage(
+                featCount
+                  ? `Feature stack extracted (${featCount} layers) and manifest saved.`
+                  : 'Feature stack extracted and manifest saved.'
+              );
             });
           }}
         />

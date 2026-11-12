@@ -201,6 +201,57 @@ function mockWorkbenchFetch() {
     if (url.includes('/ml/aois/')) {
       return new Response(JSON.stringify({ detail: 'Not Found' }), { status: 404 });
     }
+    if (url.includes('/ingestion/aois/aoi-khetri-1/run')) {
+      return ok({
+        aoi_id: 'aoi-khetri-1',
+        results: [
+          {
+            provider_key: 'macrostrat_v2',
+            status: 'completed',
+            records_written: 3,
+            fetched_count: 3,
+            job_id: 'ing-1',
+            error: null,
+          },
+          {
+            provider_key: 'usgs_mrds',
+            status: 'failed',
+            records_written: 0,
+            fetched_count: 0,
+            job_id: 'ing-2',
+            error: 'Upstream WFS timeout',
+          },
+        ],
+      });
+    }
+    if (url.includes('/satellite/scenes/ras-1/download-clipped')) {
+      return ok({
+        id: 'job-dl-1',
+        aoi_id: 'aoi-khetri-1',
+        job_type: 'cog_window_download',
+        status: 'pending',
+        progress_pct: 0,
+        parameters_json: {},
+        result_summary_json: {},
+        error_message: null,
+        started_at: '2026-01-01T00:00:00Z',
+        finished_at: null,
+      });
+    }
+    if (url.endsWith('/api/v1/jobs/job-dl-1')) {
+      return ok({
+        id: 'job-dl-1',
+        aoi_id: 'aoi-khetri-1',
+        job_type: 'cog_window_download',
+        status: 'completed',
+        progress_pct: 100,
+        parameters_json: {},
+        result_summary_json: { band_count_downloaded: 7 },
+        error_message: null,
+        started_at: '2026-01-01T00:00:00Z',
+        finished_at: '2026-01-01T00:00:02Z',
+      });
+    }
     return ok({});
   });
 }
@@ -247,6 +298,23 @@ describe('GIS Workbench App', () => {
     render(<App />);
     expect(await screen.findByRole('alert')).toHaveTextContent('Backend offline');
     expect(screen.getByRole('button', { name: /Retry/i })).toBeInTheDocument();
+  });
+
+  it('calls fixed ingestion route and surfaces partial provider error instead of false success', async () => {
+    const spy = mockWorkbenchFetch();
+    vi.stubGlobal('fetch', spy);
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('active-aoi-badge')).toHaveTextContent('Khetri Test AOI');
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Ingest Live Macrostrat & USGS MRDS/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Upstream WFS timeout');
+
+    const calledUrls = spy.mock.calls.map((c) => String(c[0]));
+    expect(calledUrls.some((u) => u.includes('/api/v1/ingestion/aois/aoi-khetri-1/run'))).toBe(true);
+    expect(calledUrls.some((u) => u.endsWith('/ingest'))).toBe(false);
   });
 });
 

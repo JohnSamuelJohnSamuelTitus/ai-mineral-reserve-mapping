@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 from typing import Any
 
@@ -9,7 +10,10 @@ import httpx
 from pydantic import BaseModel, Field
 
 from app.core.cache import CacheBackend
+from app.geological.normalizer import COMMODITY_SYNONYMS
 from app.integrations.base import BaseProviderAdapter, ProviderResponseError
+
+_MRDS_DELIM_RE = re.compile(r"[\s,;|/]+")
 
 
 class MRDSOccurrenceRecord(BaseModel):
@@ -19,6 +23,8 @@ class MRDSOccurrenceRecord(BaseModel):
     name: str
     commodity_primary: str | None = None
     commodities_all: list[str] = Field(default_factory=list)
+    raw_commodities: list[str] = Field(default_factory=list)
+    unknown_commodity_codes: list[str] = Field(default_factory=list)
     occurrence_type: str | None = None
     deposit_type: str | None = None
     lon: float
@@ -76,20 +82,24 @@ class USGSMRDSAdapter(BaseProviderAdapter):
         resp = await self.request("GET", self.base_url, params=params)
         return self.parse_gml2(resp.text)
 
-    def parse_gml2(self, xml_text: str) -> list[MRDSOccurrenceRecord]:
+    @classmethod
+    def parse_gml2(cls, xml_text: str | bytes) -> list[MRDSOccurrenceRecord]:
         """Parse USGS MapServer WFS 1.0.0 GML2 XML safely."""
+        provider_key = getattr(cls, "provider_key", "usgs_mrds")
+        if isinstance(xml_text, bytes):
+            xml_text = xml_text.decode("utf-8", errors="replace")
         if not xml_text or not xml_text.strip():
-            raise ProviderResponseError(self.provider_key, "Empty XML response from MRDS WFS")
+            raise ProviderResponseError(provider_key, "Empty XML response from MRDS WFS")
 
         try:
             root = ET.fromstring(xml_text)
         except ET.ParseError as exc:
-            raise ProviderResponseError(self.provider_key, f"Malformed XML from MRDS WFS: {exc}") from exc
+            raise ProviderResponseError(provider_key, f"Malformed XML from MRDS WFS: {exc}") from exc
 
         root_tag = root.tag.split("}")[-1]
         if root_tag == "ServiceExceptionReport":
             msg = " ".join(elem.text.strip() for elem in root.iter() if elem.text and elem.text.strip())
-            raise ProviderResponseError(self.provider_key, f"WFS ServiceException: {msg[:300]}")
+            raise ProviderResponseError(provider_key, f"WFS ServiceException: {msg[:300]}")
 
         records: list[MRDSOccurrenceRecord] = []
         for member in root.iter():
@@ -109,7 +119,7 @@ class USGSMRDSAdapter(BaseProviderAdapter):
                 elif elem.text and elem.text.strip() and len(list(elem)) == 0:
                     attrs[local.lower()] = elem.text.strip()
 
-            lon_lat = self._parse_coords(coords_text, attrs)
+            lon_lat = cls._parse_coords(coords_text, attrs)
             if lon_lat is None:
                 continue
             lon, lat = lon_lat
@@ -121,23 +131,43 @@ class USGSMRDSAdapter(BaseProviderAdapter):
                 continue
 
             site_name = attrs.get("site_name") or attrs.get("name") or f"MRDS-{dep_id}"
-            commod_raw = attrs.get("commod1") or attrs.get("commodity") or ""
-            commod_list = self._split_commodities(
-                attrs.get("commod1"), attrs.get("commod2"), attrs.get("commod3")
+            explicit_commods = cls._split_commodities(
+                attrs.get("commod1"),
+                attrs.get("commod2"),
+                attrs.get("commod3"),
+                attrs.get("commodity"),
             )
-            primary = commod_list[0] if commod_list else (commod_raw or None)
+            code_list_raw = attrs.get("code_list")
+            raw_code_tokens = cls._split_code_list(code_list_raw)
+            normalized_codes, unknown_codes = cls._normalize_code_tokens(raw_code_tokens)
+
+            raw_commodities = cls._dedupe_preserve_order([*explicit_commods, *raw_code_tokens])
+            # Preserve explicit text tokens (e.g. ["Copper", "Gold"]) when commod1..3 are given;
+            # otherwise populate normalized commodities from `code_list` (standard on mrds-low).
+            combined_commods = cls._dedupe_preserve_order(
+                [*explicit_commods, *normalized_codes]
+            )
+            primary = combined_commods[0] if combined_commods else None
+
+            raw_attrs_out: dict[str, Any] = dict(attrs)
+            if raw_code_tokens:
+                raw_attrs_out["raw_commodity_codes"] = raw_code_tokens
+            if unknown_codes:
+                raw_attrs_out["unknown_commodity_codes"] = unknown_codes
 
             records.append(
                 MRDSOccurrenceRecord(
                     external_id=str(dep_id),
                     name=site_name,
                     commodity_primary=primary,
-                    commodities_all=commod_list,
+                    commodities_all=combined_commods,
+                    raw_commodities=raw_commodities,
+                    unknown_commodity_codes=unknown_codes,
                     occurrence_type=attrs.get("dev_stat") or attrs.get("oper_type"),
                     deposit_type=attrs.get("dep_type") or attrs.get("ore_body"),
                     lon=lon,
                     lat=lat,
-                    raw_attributes=attrs,
+                    raw_attributes=raw_attrs_out,
                 )
             )
         return records
@@ -160,13 +190,54 @@ class USGSMRDSAdapter(BaseProviderAdapter):
         return None
 
     @staticmethod
+    def _dedupe_preserve_order(tokens: list[str]) -> list[str]:
+        seen: list[str] = []
+        for token in tokens:
+            if token and token not in seen:
+                seen.append(token)
+        return seen
+
+    @staticmethod
     def _split_commodities(*values: str | None) -> list[str]:
         seen: list[str] = []
         for val in values:
             if not val:
                 continue
-            for token in val.replace(";", ",").split(","):
+            for token in val.replace(";", ",").replace("|", ",").split(","):
                 cleaned = token.strip()
                 if cleaned and cleaned not in seen:
                     seen.append(cleaned)
         return seen
+
+    @staticmethod
+    def _split_code_list(code_list_raw: str | None) -> list[str]:
+        """Extract ordered tokens from USGS MRDS `code_list` (typically space-delimited)."""
+        if not code_list_raw or not code_list_raw.strip():
+            return []
+        tokens: list[str] = []
+        for raw_tok in _MRDS_DELIM_RE.split(code_list_raw.strip()):
+            cleaned = raw_tok.strip()
+            if cleaned and cleaned not in tokens:
+                tokens.append(cleaned)
+        return tokens
+
+    @staticmethod
+    def _normalize_code_tokens(raw_tokens: list[str]) -> tuple[list[str], list[str]]:
+        """Map recognized USGS MRDS commodity codes; preserve unknown codes without guessing."""
+        normalized: list[str] = []
+        unknown: list[str] = []
+        for token in raw_tokens:
+            lowered = token.strip().lower()
+            if not lowered:
+                continue
+            if lowered in COMMODITY_SYNONYMS:
+                canon = COMMODITY_SYNONYMS[lowered]
+                if canon not in normalized:
+                    normalized.append(canon)
+            else:
+                preserved = token.strip()
+                if preserved not in normalized:
+                    normalized.append(preserved)
+                if preserved not in unknown:
+                    unknown.append(preserved)
+        return normalized, unknown

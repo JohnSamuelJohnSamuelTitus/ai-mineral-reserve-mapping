@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from app.core.cache import CacheBackend
 from app.core.logging import get_logger
 from app.integrations.base import BaseProviderAdapter, ProviderError, ProviderResponseError
+from app.storage.manager import sanitize_url_for_storage
 
 logger = get_logger(__name__)
 
@@ -31,6 +32,128 @@ BAND_ALIASES: dict[str, list[str]] = {
     "aster_tir": ["TIR"],
     "thermal": ["lwir11", "TIR"],
 }
+
+SENTINEL2_CANONICAL_BAND_ASSETS: dict[str, tuple[str, ...]] = {
+    "B02": ("B02", "blue"),
+    "B03": ("B03", "green"),
+    "B04": ("B04", "red"),
+    "B08": ("B08", "nir"),
+    "B8A": ("B8A", "nir08"),
+    "B11": ("B11", "swir16"),
+    "B12": ("B12", "swir22"),
+    "SCL": ("SCL", "scl"),
+}
+
+ASTER_GROUPED_ASSETS: tuple[str, ...] = ("VNIR", "SWIR", "TIR")
+
+
+def _extract_compact_asset_info(assets_raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Extract non-secret band metadata summaries (eo:bands, raster:bands) per STAC asset."""
+    info: dict[str, dict[str, Any]] = {}
+    for key, val in assets_raw.items():
+        if not isinstance(val, dict) or not isinstance(val.get("href"), str):
+            continue
+        entry: dict[str, Any] = {}
+        if isinstance(val.get("title"), str):
+            entry["title"] = val["title"]
+        eo_bands = val.get("eo:bands")
+        if isinstance(eo_bands, list):
+            entry["eo_bands"] = [
+                {
+                    "name": b.get("name"),
+                    "common_name": b.get("common_name"),
+                    "center_wavelength": b.get("center_wavelength"),
+                }
+                for b in eo_bands
+                if isinstance(b, dict)
+            ]
+        raster_bands = val.get("raster:bands")
+        if isinstance(raster_bands, list):
+            entry["raster_bands"] = [
+                {
+                    "name": b.get("name"),
+                    "nodata": b.get("nodata"),
+                    "data_type": b.get("data_type"),
+                    "spatial_resolution": b.get("spatial_resolution"),
+                }
+                for b in raster_bands
+                if isinstance(b, dict)
+            ]
+        if entry:
+            info[str(key)] = entry
+    return info
+
+
+def resolve_scene_download_targets(
+    *,
+    collection: str | None,
+    product_type: str | None,
+    asset_hrefs: dict[str, str],
+    band_key: str = "auto",
+) -> list[tuple[str, str, str]]:
+    """Resolve `(canonical_band_key, source_asset_key, raw_url)` targets for a scene.
+
+    Never substitutes missing spectral bands with another band.
+    """
+    if not asset_hrefs:
+        return []
+
+    requested = band_key.strip()
+    col = (collection or "").lower()
+    ptype = (product_type or "").lower()
+
+    if requested.lower() in {"auto", "all"}:
+        if "sentinel-2" in col or "sentinel2" in ptype:
+            targets: list[tuple[str, str, str]] = []
+            for canon, candidates in SENTINEL2_CANONICAL_BAND_ASSETS.items():
+                for cand in candidates:
+                    if cand in asset_hrefs:
+                        targets.append((canon, cand, asset_hrefs[cand]))
+                        break
+            return targets
+        if "aster" in col or "ast_" in col or "aster" in ptype:
+            return [
+                (grp, grp, asset_hrefs[grp])
+                for grp in ASTER_GROUPED_ASSETS
+                if grp in asset_hrefs
+            ]
+        if "dem" in col or "dem" in ptype:
+            for cand in ("data", "dem", "elevation"):
+                if cand in asset_hrefs:
+                    return [("DEM", cand, asset_hrefs[cand])]
+        first_key = next(iter(asset_hrefs.keys()))
+        return [(first_key, first_key, asset_hrefs[first_key])]
+
+    # Explicit single or comma-separated band keys
+    targets = []
+    for raw_tok in [t.strip() for t in requested.split(",") if t.strip()]:
+        if raw_tok in asset_hrefs:
+            canon = next(
+                (
+                    k
+                    for k, cands in SENTINEL2_CANONICAL_BAND_ASSETS.items()
+                    if raw_tok in cands
+                ),
+                raw_tok,
+            )
+            targets.append((canon, raw_tok, asset_hrefs[raw_tok]))
+            continue
+        upper = raw_tok.upper()
+        if upper in SENTINEL2_CANONICAL_BAND_ASSETS:
+            for cand in SENTINEL2_CANONICAL_BAND_ASSETS[upper]:
+                if cand in asset_hrefs:
+                    targets.append((upper, cand, asset_hrefs[cand]))
+                    break
+            continue
+        lower = raw_tok.lower()
+        for alias_cands in BAND_ALIASES.values():
+            if lower in [a.lower() for a in alias_cands]:
+                for cand in alias_cands:
+                    if cand in asset_hrefs:
+                        targets.append((raw_tok, cand, asset_hrefs[cand]))
+                        break
+                break
+    return targets
 
 
 def estimate_clipped_raster_mb(
@@ -90,6 +213,7 @@ class STACSceneMetadata(BaseModel):
     bbox: list[float]
     geometry: dict[str, Any]
     asset_hrefs: dict[str, str] = Field(default_factory=dict)
+    asset_info: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class STACSearchAdapter(BaseProviderAdapter):
@@ -208,10 +332,11 @@ class STACSearchAdapter(BaseProviderAdapter):
 
             assets_raw = feat.get("assets") or {}
             asset_hrefs = {
-                k: v["href"]
+                k: sanitize_url_for_storage(v["href"])
                 for k, v in assets_raw.items()
                 if isinstance(v, dict) and isinstance(v.get("href"), str)
             }
+            asset_info = _extract_compact_asset_info(assets_raw)
             collection_id = str(feat.get("collection") or (collections[0] if collections else ""))
             asset_keys = sorted(asset_hrefs.keys())
             platform, product_type, resolution_m = _infer_collection_defaults(
@@ -254,6 +379,7 @@ class STACSearchAdapter(BaseProviderAdapter):
                     bbox=[float(x) for x in item_bbox[:4]],
                     geometry=geom,
                     asset_hrefs=asset_hrefs,
+                    asset_info=asset_info,
                 )
             )
         return items
