@@ -22,19 +22,22 @@
 
 ## 3. Frontend Test Layers
 
-- **Type Checking & Linting:** `tsc --noEmit`, `eslint`, `prettier --check`.
-- **Component & Store Tests (`Vitest` + `React Testing Library`):**
-  - Data-origin badge rendering (`REAL`, `SYNTHETIC`, `DEMO`).
-  - Layer visibility/opacity state synchronization.
-  - Target ranking table sorting/filtering and error-banner rendering when backend returns degraded API status.
-- **End-to-End Smoke Tests (`Playwright`):**
-  - Load Overview Dashboard $\rightarrow$ open Exploration Map $\rightarrow$ select/create AOI $\rightarrow$ inspect geological unit & target ranking drawer $\rightarrow$ export report.
+- **Type Checking & Build Verification:** `vite build` / TypeScript bundling (`npm.cmd --prefix frontend run build`).
+- **Component & Geometry Tests (`Vitest` + `React Testing Library`):**
+  - Located in `frontend/src/test/workbench.test.tsx`.
+  - Covers self-intersection polygon geometry validation (`polygonGeometry.ts`), workbench rendering with mocked API payloads, basemap & NASA GIBS quantitative-warning pill, layer toggle state, Inspector / AOI Health / Features & ML tabs.
+- **Live Browser Verification (Headless Chrome DevTools Protocol / CDP):**
+  - Verifies live `uvicorn` + `vite` integration with zero console errors or uncaught JS exceptions, real tile/overlay rendering, API roundtrips, and visual screenshot review.
 
 ---
 
-## 4. Static Analysis, Security & CI Gates
+## 4. Phase 3 Backend Test Organization (`pytest`)
 
-- **Python:** `ruff` (lint + format), `mypy` (strict typing on `app/`), `pip-audit` / `uv` lockfile checks.
-- **Secrets Prevention:** Pre-commit / CI scan ensuring `.env`, private keys, and real API credentials are never committed.
-- **CI Pipeline (GitHub Actions):** Runs `ruff`, `mypy`, `pytest` (unit + integration with PostGIS service container), `tsc`, `vitest`, and `vite build` on every pull request.
+- `backend/tests/unit/`: Config, CRS utilities, Phase 2 core schemas.
+- `backend/tests/integration/`: FastAPI SQLite endpoint tests (`/aois`, `/ingestion`, `/sources`, `/literature`, `/geocode`).
+- `backend/tests/geospatial/`:
+  - `test_phase3a_ingestion_and_stac.py`: Occurrence normalization, commodity mapping, quarantine, quality reports, STAC auth gating, size limits.
+  - `test_phase3b_features.py`: UTM grid spec alignment, Sentinel-2/ASTER spectral ratios, SCL masking, DEM derivatives, proximity non-fabrication, feature stack extraction & PNG overlay rendering.
+  - `test_phase3d_ml_dataset.py`: PU labeling, deterministic spatial block reproducibility, Mindat exclusion, `dist_to_occurrence_m` leakage detection, readiness blocking (`HTTP 422`), and `GroupKFold` baseline evaluation.
+- Static lint check via `backend\.venv\Scripts\ruff.exe check backend/app backend/tests`.
 

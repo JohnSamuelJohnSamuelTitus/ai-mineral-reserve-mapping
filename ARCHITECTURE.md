@@ -80,26 +80,24 @@ flowchart LR
 7. **Database & Spatial Storage (`backend/app/db/` + `data/`)**
    - PostgreSQL/PostGIS serves transactional queries, spatial joins, and `ST_AsMVT` vector tiles; local/object storage holds aligned COGs and serialized model artifacts referenced by URI and SHA-256 checksum.
 
-8. **AI Geological Assistant (`backend/app/assistant/`)**
-   - Uses a strict **tool-calling / grounded RAG** pattern: before answering questions about an AOI or target, it invokes internal read-only tools querying PostGIS (`get_target_evidence`, `get_aoi_geology_summary`, `get_model_metrics`) and external literature (`search_openalex_geology`).
-   - Attaches provenance citations and automatically appends scientific caveats when discussing predictive scores.
+8. **AI Geological Assistant (`backend/app/assistant/`)** *(Planned Phase 5)*
+   - Will use a strict **tool-calling / grounded RAG** pattern querying database evidence and OpenAlex literature with explicit citations and scientific caveats.
 
-9. **Reporting Module (`backend/app/reporting/`)**
-   - Compiles reproducible exploration dossiers from `aois`, `model_runs`, `exploration_targets`, `data_sources`, and map snapshots into **Markdown**, **PDF** (WeasyPrint/ReportLab), and **GeoJSON/GeoPackage** exports—always including data provenance tables, spatial CV metrics, and non-reserve disclaimers.
+9. **Reporting Module (`backend/app/reporting/`)** *(Planned Phase 5)*
+   - Will compile reproducible exploration dossiers (Markdown, PDF, GeoJSON) with provenance tables, spatial CV metrics, and non-reserve disclaimers.
 
 ---
 
-## 4. UI/UX Architecture (9 Planned Workspace Sections)
+## 4. Implemented Phase 3 Architecture & Endpoints (Native Windows SQLite MVP)
 
-Design language: **Dark/slate high-contrast scientific GIS workbench** (inspired by QGIS, Seequent/Oasis montaj, and Earth Observation intelligence platforms) with clear data-origin badges (`REAL`, `SYNTHETIC`, `DEMO`), coordinate readouts, scale bars, and explicit uncertainty indicators.
+Phase 2 and Phase 3 run natively on Windows (FastAPI + SQLite + Alembic + GeoPandas/Rasterio/PyProj/Scikit-learn + React/TypeScript/Vite/MapLibre GL JS 5) while preserving clean repository boundaries for future PostgreSQL/PostGIS and Redis upgrades:
 
-1. **Overview Dashboard (`/`)** — Active AOIs, recent model runs, API connector health badges (live HTTP status from `data_sources`), top-ranked exploration targets summary, and recent ingestion jobs.
-2. **Interactive Exploration Map (`/map`)** — Full-bleed **MapLibre GL JS** 2D/2.5D canvas + toggleable **CesiumJS** 3D terrain view; collapsible layer tree (Basemap, Macrostrat Geology, USGS MRDS Occurrences, Faults/Lineaments, Spectral Alteration Overlays, Prospectivity Heatmap, Ranked Target Polygons); opacity sliders, swipe/compare, and click-to-inspect cell evidence drawer.
-3. **Satellite Imagery Analysis (`/satellite`)** — STAC scene browser (Sentinel-2, Landsat, EMIT, ASTER) filtered by AOI, date range, and cloud cover; spectral band-ratio preset generator (Iron Oxide, Clay/Hydroxyl, Gossan, NDVI mask) with side-by-side bare-earth validity preview.
-4. **Geological Data Explorer (`/geology`)** — Tabular and spatial browser for Macrostrat lithology/stratigraphy columns, USGS MRDS / GA / BGS mineral occurrences, soil geochemistry proxies, and seismicity/fault density within the active AOI.
-5. **Mineral Prediction (`/predict`)** — Experiment builder: choose AOI, grid cell size, target commodity / deposit model, feature set, algorithm (Logistic baseline, Random Forest, XGBoost), and spatial block CV folds; live training progress, P-A curve, spatial CV metrics, and global/local SHAP feature importance charts.
-6. **Exploration Target Ranking (`/targets`)** — Prioritized target table ranked by composite prospectivity score, uncertainty tier, and data coverage; target detail panel showing local SHAP drivers, overlapping geology/occurrences, and recommended field-verification steps (e.g., soil sampling, ground geophysics, geological mapping).
-7. **AI Geological Assistant (`/assistant`)** — Split-screen chat + live AOI/target context panel; cites exact Macrostrat units, MRDS records, SHAP drivers, and OpenAlex papers; includes quick-prompt templates for deposit-model interpretation and anomaly triage.
-8. **Reports & Exports (`/reports`)** — One-click dossier generator (Markdown, PDF, GeoJSON) with customizable sections, automated attribution table, model limitations, and mandatory non-reserve compliance notice.
-9. **Settings & Data Sources (`/settings`)** — API key/credential status (masked, never exposed to browser), live endpoint health checks, rate-limit/cache controls, ML licensing guardrails, and clear toggle/labeling for demonstration datasets.
+- **Backend API Routers (`backend/app/api/v1/`):**
+  - `routes.py`: `/health`, `/sources`, `/aois` (`GET`, `POST`, `PUT`), `/aois/{id}/ingest`, `/aois/{id}/occurrences`, `/aois/{id}/geology`, `/aois/{id}/assets`, `/aois/{id}/summary`, `/jobs/{id}`, `/literature/search`, `/geocode/search`.
+  - `geology_routes.py`: `/geology/aois/{aoi_id}/import`, `/geology/aois/{aoi_id}/quality-reports`, `/geology/aois/{aoi_id}/quarantined`.
+  - `satellite_routes.py`: `/satellite/gibs-layers`, `/satellite/search`, `/satellite/assets/{asset_id}/download`, `/satellite/jobs/{job_id}`.
+  - `features_routes.py`: `/features/rasters/{asset_id}/inspect`, `/features/aois/{aoi_id}/extract`, `/features/aois/{aoi_id}/manifests`, `/features/manifests/{manifest_id}`, `/features/manifests/{manifest_id}/overlay.json`, `/features/manifests/{manifest_id}/overlay.png`, `/features/aois/{aoi_id}/coverage`.
+  - `ml_routes.py`: `/ml/aois/{aoi_id}/datasets/build`, `/ml/aois/{aoi_id}/datasets`, `/ml/datasets/{dataset_id}`, `/ml/datasets/{dataset_id}/evaluate`.
+- **Frontend Interactive GIS Workbench (`frontend/src/`):**
+  - `App.tsx`, `WorkbenchHeader.tsx`, `GISMapCanvas.tsx` (MapLibre GL JS 5 + polygon vertex draw/edit + self-intersection validator + OpenStreetMap/Esri/OpenTopoMap/NASA GIBS/Offline Slate basemaps), `LeftControlSidebar.tsx` (AOI selector, layer visibility/z-order/opacity, STAC & overlay controls), and `RightInspectorDrawer.tsx` (`inspector`, `health`, and `ml` tabs for feature extraction, ML dataset readiness/leakage gates, and GroupKFold baseline evaluation).
 

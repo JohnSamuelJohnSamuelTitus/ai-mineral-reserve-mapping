@@ -143,5 +143,20 @@ CREATE TYPE job_status_enum AS ENUM ('pending', 'running', 'completed', 'failed'
 - **Spatial Indexes:** `CREATE INDEX idx_<table>_geom ON <table> USING GIST (geom);` on all geometry columns.
 - **Composite Indexes:** `(model_run_id, prospectivity_score DESC)` on `prospectivity_predictions` for instant top-$k$ target queries and GeoJSON/MVT streaming.
 - **Vector Tiles:** PostGIS `ST_AsMVT` / `ST_AsMVTGeom` serves large `grid_cells` and `mineral_occurrences` layers directly as Mapbox Vector Tiles (`/api/v1/tiles/{layer}/{z}/{x}/{y}.pbf`) so MapLibre GL JS renders 100k+ cells smoothly without crashing the browser with giant GeoJSON payloads.
-- **Migrations:** Managed strictly via **Alembic** + SQLAlchemy 2.0 + GeoAlchemy2.
+- **Migrations:** Managed strictly via **Alembic** + SQLAlchemy 2.0 (+ GeoAlchemy2 when PostgreSQL/PostGIS is introduced; see [POSTGIS_MIGRATION_PLAN.md](POSTGIS_MIGRATION_PLAN.md)).
+
+---
+
+## 5. Implemented Native Windows SQLite Schema (Phase 2 + Phase 3 Alembic Migrations)
+
+During Phases 2 and 3, development runs natively on Windows using SQLite (`data/mineral_dev.db`) with Shapely/GeoPandas geometry processing behind repository interfaces (`backend/app/db/repositories.py`):
+
+- **Revision `0001_initial_phase2`:** Core tables (`areas_of_interest`, `data_sources`, `mineral_occurrences`, `geological_units`, `raster_assets`, `ingestion_jobs`) storing AOI/feature geometry in migration-friendly GeoJSON/WKT + bounding box columns.
+- **Revision `0002_phase3_tables`:**
+  - Extended `raster_assets` with `platform`, `product_type`, `local_path`, `download_status`, `requires_auth`, `estimated_size_mb`, and `bands_available`.
+  - Added `occurrence_quarantined` for rejected/malformed geological records (preserving `rejection_reason`, `quality_flags`, and `raw_record`).
+  - Added `dataset_quality_reports` for completeness, duplicate counts, coordinate errors, commodity distributions, and ingestion warnings.
+  - Added `processing_jobs` to track bounded downloads and raster operations.
+  - Added `feature_manifests` to record metric UTM grid specs (`target_crs_epsg`, `resolution_m`, `grid_rows`, `grid_cols`, `nodata_value`), `input_datasets_json`, `input_scene_ids`, `feature_names`, `output_files_json`, and non-fabrication warnings.
+  - Added `ml_dataset_versions` to track PU counts (`positive_count`, `unlabeled_count`, `explicit_negative_count`), `spatial_block_count`, `quality_passed`, `leakage_checked`, `blocking_reasons_json`, `stats_json`, and artifact paths.
 

@@ -17,60 +17,76 @@
 
 ---
 
-## Phase 1 Foundation Documents
+## Foundation & Scientific Documentation
 
 | Document | Purpose |
 |---|---|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Tech stack finalization, 9-module architecture, inter-module communication, and 9-page UI/UX plan |
-| [API_CATALOG.md](API_CATALOG.md) | Audit of `public-apis/public-apis` + specialist APIs, live HTTP probe results, auth, pricing, and licenses |
-| [DATABASE_DESIGN.md](DATABASE_DESIGN.md) | PostgreSQL + PostGIS schema, CRS strategy, COG storage model, and `ST_AsMVT` vector tiles |
-| [DEVELOPMENT_ROADMAP.md](DEVELOPMENT_ROADMAP.md) | Milestone-by-milestone implementation plan from Phase 1 to production hardening |
-| [TESTING_STRATEGY.md](TESTING_STRATEGY.md) | Unit, geospatial/CRS, spatial-CV anti-leakage, API contract, and E2E testing strategy |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Tech stack, implemented backend/frontend architecture, and UI workbench plan |
+| [API_CATALOG.md](API_CATALOG.md) | Audit of `public-apis/public-apis` + specialist APIs, auth, pricing, and licenses |
+| [DATABASE_DESIGN.md](DATABASE_DESIGN.md) | SQLite Phase 2/3 schema, Alembic migrations (`0001`, `0002`), and PostgreSQL+PostGIS target model |
+| [POSTGIS_MIGRATION_PLAN.md](POSTGIS_MIGRATION_PLAN.md) | Migration strategy from native Windows SQLite to PostgreSQL 16 + PostGIS 3.4 |
+| [DEVELOPMENT_ROADMAP.md](DEVELOPMENT_ROADMAP.md) | Milestone-by-milestone status across Phases 1–5 |
+| [TESTING_STRATEGY.md](TESTING_STRATEGY.md) | Backend (`pytest`), geospatial, ML spatial-CV, and frontend (`Vitest`, Chrome CDP) QA strategy |
+| [SATELLITE_DATA_GUIDE.md](SATELLITE_DATA_GUIDE.md) | STAC discovery, auth gating, windowed COG clipping, and NASA GIBS visualization boundaries |
+| [RASTER_PROCESSING_GUIDE.md](RASTER_PROCESSING_GUIDE.md) | UTM `TargetGridSpec` reprojection, nodata conventions, and bounded memory/disk safeguards |
+| [FEATURE_ENGINEERING_GUIDE.md](FEATURE_ENGINEERING_GUIDE.md) | Spectral alteration ratios, SCL masking, DEM terrain derivatives, and leakage/non-fabrication policy |
+| [GEOLOGICAL_DATA_QUALITY.md](GEOLOGICAL_DATA_QUALITY.md) | Occurrence normalization, commodity synonym mapping, quarantine, and quality reports |
+| [ML_DATASET_GUIDE.md](ML_DATASET_GUIDE.md) | PU labeling, deterministic `B_{bx}_{by}` spatial blocking, `GroupKFold`, and readiness gates |
+| [PHASE3_COMPLETION_REPORT.md](PHASE3_COMPLETION_REPORT.md) | Delivered Phase 3 scope, commit history, verification gates, and scientific caveats |
 | [.env.example](.env.example) | Environment configuration template (never commit `.env` or real keys) |
 
 ---
 
-## Planned Repository Structure
+## Implemented Repository Structure (Phase 3 Complete)
 
 ```text
 .
 ├── backend/
+│   ├── alembic.ini
+│   ├── pyproject.toml
 │   ├── app/
-│   │   ├── api/v1/          # FastAPI routers & Pydantic schemas
-│   │   ├── core/            # Config, structured logging, security
-│   │   ├── db/              # SQLAlchemy/GeoAlchemy2 models & Alembic migrations
-│   │   ├── integrations/    # External API adapters (STAC, Macrostrat, USGS, OpenAlex, DEM)
-│   │   ├── ingestion/       # AOI-scoped ingestion orchestrators
-│   │   ├── geospatial/      # GDAL/Rasterio spectral indices, DEM derivatives, grid builder
-│   │   ├── ml/              # Spatial CV, Scikit-learn/XGBoost/PyTorch, SHAP, target clustering
-│   │   ├── assistant/       # Grounded tool-calling AI geological assistant
-│   │   └── reporting/       # Markdown, PDF & GeoJSON exploration dossier generator
+│   │   ├── main.py          # FastAPI entrypoint, CORS, startup seed/setup
+│   │   ├── api/v1/          # routes.py, geology_routes.py, satellite_routes.py, features_routes.py, ml_routes.py, schemas.py
+│   │   ├── core/            # Config, in-memory cache, UTM/CRS math, structured logging
+│   │   ├── db/              # SQLAlchemy 2 models, repositories, Alembic migrations (0001, 0002), seed
+│   │   ├── geological/      # Multi-format importer, occurrence normalizer & quarantine, quality reports
+│   │   ├── geospatial/      # raster_ops, spectral indices, DEM terrain derivatives, proximity, pipeline
+│   │   ├── ingestion/       # AOI-scoped ingestion orchestrator
+│   │   ├── integrations/    # Macrostrat, USGS MRDS, STAC (MPC/Earth Search/CMR), NASA GIBS, Elevation, India sources, OpenAlex, Nominatim
+│   │   ├── ml/              # PU spatial ML dataset builder & gated GroupKFold baseline evaluator
+│   │   ├── satellite/       # Safe AOI-clipped COG downloader & storage validation
+│   │   └── storage/         # Safe filename sanitization, path traversal guard & free disk checks
 │   └── tests/               # unit/, integration/, geospatial/
 ├── frontend/
-│   ├── public/
+│   ├── index.html
+│   ├── package.json
+│   ├── vite.config.ts
+│   ├── vitest.config.ts
 │   └── src/
-│       ├── components/      # layout/, map/ (MapLibre), globe/ (CesiumJS), charts/, common/
-│       ├── pages/           # 9 workspace views
-│       ├── services/        # Typed FastAPI clients
-│       ├── store/           # Application & viewport state
+│       ├── components/      # layout/, map/ (MapLibre GL JS + polygon validator), panels/ (Control sidebar & Inspector drawer)
+│       ├── services/        # Typed FastAPI API client
 │       └── types/           # TypeScript domain contracts
-├── ml_experiments/          # Spatial CV benchmarks & experiment configs
-├── data/                    # Gitignored local cache (raw/, interim/, processed/)
-└── infra/                   # Docker Compose (PostGIS, Redis) & DB initialization
+├── ml_experiments/          # Experiment workspace
+├── data/                    # Gitignored local storage (mineral_dev.db, raw/, interim/, processed/, rasters/)
+└── infra/                   # Optional PostgreSQL/PostGIS reference configs (not used in native Windows Phase 2/3)
 ```
 
 ---
 
-## Development Environment Status (Verified Phase 1)
+## Development Environment & Running Locally (Native Windows)
 
-- **Python:** `3.12.14` managed via `uv 0.12.17`
-- **Node.js / npm:** `v24.22.1` / `11.19.1` (`npm.cmd`)
+Phase 2 and Phase 3 run natively on Windows without Docker, WSL, or Linux dependencies:
+
+- **Python:** `3.12.14` (`backend/.venv`) with FastAPI, SQLAlchemy 2, Alembic, SQLite, GeoPandas, Shapely, PyProj, Rasterio, Scikit-learn, Pandas, NumPy.
+- **Node.js / npm:** `v24.22.1` / `11.19.1` (`npm.cmd`) with React 19, TypeScript, Vite 6, MapLibre GL JS 5, Vitest 4.
 - **Git:** `2.56.0`
-- **Database / Containers:** Local `psql` and `docker` are not yet installed on this workstation (to be provisioned in Phase 2 via Docker Desktop or local PostgreSQL 16 + PostGIS 3.4).
 
----
+### Start Backend & Frontend
+```powershell
+# Backend API (runs on http://127.0.0.1:8000)
+backend\.venv\Scripts\uvicorn.exe app.main:app --app-dir backend --reload --port 8000
 
-## Getting Started (Phase 2+)
-
-*Application source code implementation begins after Phase 1 architecture approval.*
+# Frontend Workbench (runs on http://127.0.0.1:5173)
+npm.cmd --prefix frontend run dev
+```
 
