@@ -15,6 +15,7 @@ from app.api.v1.satellite_routes import router as satellite_router
 from app.api.v1.schemas import (
     AOICreateRequest,
     AOIResponse,
+    AOIUpdateRequest,
     DataSourceResponse,
     GeologicalUnitResponse,
     HealthResponse,
@@ -151,6 +152,38 @@ def get_aoi(aoi_id: str, db: Session = Depends(get_db)) -> AOIResponse:
     if aoi is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AOI not found")
     return _aoi_to_response(aoi)
+
+
+@router.put("/aois/{aoi_id}", response_model=AOIResponse, tags=["aois"])
+def update_aoi(
+    aoi_id: str,
+    payload: AOIUpdateRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> AOIResponse:
+    repo = AOIRepository(db)
+    aoi = repo.get(aoi_id)
+    if aoi is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AOI not found")
+    normalized = None
+    if payload.geometry is not None:
+        try:
+            normalized = validate_and_normalize_aoi_geojson(
+                payload.geometry, max_area_km2=settings.max_aoi_area_km2
+            )
+        except GeospatialValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+            ) from exc
+    updated = repo.update(
+        aoi,
+        name=payload.name,
+        description=payload.description,
+        commodity_focus=payload.commodity_focus,
+        deposit_model=payload.deposit_model,
+        normalized=normalized,
+    )
+    return _aoi_to_response(updated)
 
 
 @router.delete("/aois/{aoi_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["aois"])
@@ -341,6 +374,7 @@ def list_aoi_geology(aoi_id: str, db: Session = Depends(get_db)) -> list[Geologi
             age_min_ma=u.age_min_ma,
             age_max_ma=u.age_max_ma,
             period_name=u.period_name,
+            geometry=json.loads(u.geom_geojson) if u.geom_geojson else {},
             data_origin=u.data_origin,
             collected_at=u.collected_at,
         )

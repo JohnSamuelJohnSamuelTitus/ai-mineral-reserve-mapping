@@ -27,6 +27,14 @@ class AOICreateRequest(BaseModel):
     data_origin: Literal["real", "synthetic", "demonstration"] = "real"
 
 
+class AOIUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    commodity_focus: list[str] | None = None
+    deposit_model: str | None = Field(default=None, max_length=100)
+    geometry: dict[str, Any] | None = None
+
+
 class AOIResponse(BaseModel):
     id: str
     name: str
@@ -108,6 +116,7 @@ class GeologicalUnitResponse(BaseModel):
     age_min_ma: float | None
     age_max_ma: float | None
     period_name: str | None
+    geometry: dict[str, Any] = Field(default_factory=dict)
     data_origin: str
     collected_at: datetime
 

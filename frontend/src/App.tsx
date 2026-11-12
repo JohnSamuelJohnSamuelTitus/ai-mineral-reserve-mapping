@@ -1,240 +1,484 @@
-import { useEffect, useRef, useState } from "react";
-import maplibregl from "maplibre-gl";
+import React, { useCallback, useEffect, useState } from 'react';
+import { WorkbenchHeader } from './components/layout/WorkbenchHeader';
+import { GISMapCanvas } from './components/map/GISMapCanvas';
+import {
+  geoJSONPolygonToVertices,
+  verticesToGeoJSONPolygon,
+} from './components/map/polygonGeometry';
+import { LeftControlSidebar } from './components/panels/LeftControlSidebar';
+import { RightInspectorDrawer } from './components/panels/RightInspectorDrawer';
+import { apiClient } from './services/api';
+import type {
+  AOICoverageSummary,
+  AOIItem,
+  BasemapId,
+  DatasetQualityReportItem,
+  DataSourceItem,
+  FeatureManifestItem,
+  FeatureOverlayDescriptor,
+  GeologicalUnitItem,
+  GIBSLayerItem,
+  GISLayerConfig,
+  HealthStatus,
+  InspectorSelection,
+  LayerKey,
+  MineralOccurrenceItem,
+  MLDatasetVersionItem,
+  RasterAssetItem,
+} from './types/gis';
 
-interface HealthStatus {
-  status: string;
-  app_name: string;
-  database_backend: string;
-  postgis_enabled: boolean;
-  cache_stats: Record<string, number>;
-  scientific_disclaimer: string;
-}
+const DEFAULT_LAYERS: GISLayerConfig[] = [
+  { key: 'mineral_occurrences', label: 'Mineral Occurrences (Authority)', visible: true, opacity: 1 },
+  { key: 'aoi_boundary', label: 'AOI Boundaries', visible: true, opacity: 1 },
+  { key: 'raster_footprints', label: 'STAC Footprints', visible: true, opacity: 0.85 },
+  { key: 'feature_overlay', label: 'Feature Raster Overlay', visible: true, opacity: 0.8 },
+  { key: 'geology_units', label: 'Bedrock Geology Units', visible: true, opacity: 0.7 },
+];
 
-interface DataSourceInfo {
-  id: string;
-  provider_key: string;
-  display_name: string;
-  jurisdiction: string;
-  label_authority: string;
-  license: string;
-  is_ml_training_allowed: boolean;
-  last_health_status: string | null;
-}
-
-interface AOISummary {
-  id: string;
-  name: string;
-  jurisdiction: string;
-  processing_epsg: number;
-  area_km2: number;
-  data_origin: string;
-  geometry: GeoJSON.Geometry;
-}
-
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
-
-export default function App() {
-  const mapContainerRef = useRef<HTMLDivElement | null>(null);
+export function App(): React.ReactElement {
   const [health, setHealth] = useState<HealthStatus | null>(null);
-  const [sources, setSources] = useState<DataSourceInfo[]>([]);
-  const [aois, setAois] = useState<AOISummary[]>([]);
-  const [apiError, setApiError] = useState<string | null>(null);
+  const [sources, setSources] = useState<DataSourceItem[]>([]);
+  const [aois, setAois] = useState<AOIItem[]>([]);
+  const [activeAoi, setActiveAoi] = useState<AOIItem | null>(null);
 
-  useEffect(() => {
-    const controller = new AbortController();
-    async function loadBackendState() {
-      try {
-        const [hRes, sRes, aRes] = await Promise.all([
-          fetch(`${API_BASE}/health`, { signal: controller.signal }),
-          fetch(`${API_BASE}/sources`, { signal: controller.signal }),
-          fetch(`${API_BASE}/aois`, { signal: controller.signal }),
-        ]);
-        if (!hRes.ok || !sRes.ok || !aRes.ok) {
-          throw new Error("Backend returned non-OK status");
-        }
-        const [hJson, sJson, aJson] = await Promise.all([
-          hRes.json() as Promise<HealthStatus>,
-          sRes.json() as Promise<DataSourceInfo[]>,
-          aRes.json() as Promise<AOISummary[]>,
-        ]);
-        setHealth(hJson);
-        setSources(sJson);
-        setAois(aJson);
-        setApiError(null);
-      } catch (err) {
-        if ((err as Error).name !== "AbortError") {
-          setApiError("FastAPI backend offline or unreachable on /api/v1.");
-        }
-      }
+  const [occurrences, setOccurrences] = useState<MineralOccurrenceItem[]>([]);
+  const [geologyUnits, setGeologyUnits] = useState<GeologicalUnitItem[]>([]);
+  const [rasters, setRasters] = useState<RasterAssetItem[]>([]);
+  const [manifests, setManifests] = useState<FeatureManifestItem[]>([]);
+  const [selectedManifestId, setSelectedManifestId] = useState<string | null>(null);
+  const [selectedOverlayFeature, setSelectedOverlayFeature] = useState<string>('');
+  const [overlay, setOverlay] = useState<FeatureOverlayDescriptor | null>(null);
+  const [coverage, setCoverage] = useState<AOICoverageSummary | null>(null);
+  const [qualityReports, setQualityReports] = useState<DatasetQualityReportItem[]>([]);
+  const [mlDatasets, setMlDatasets] = useState<MLDatasetVersionItem[]>([]);
+  const [mlUnavailableReason, setMlUnavailableReason] = useState<string | null>(null);
+
+  const [gibsLayers, setGibsLayers] = useState<GIBSLayerItem[]>([]);
+  const [basemap, setBasemap] = useState<BasemapId>('osm_standard');
+  const [layers, setLayers] = useState<GISLayerConfig[]>(DEFAULT_LAYERS);
+  const [rightOpen, setRightOpen] = useState(true);
+  const [selection, setSelection] = useState<InspectorSelection>(null);
+  const [interactionMode, setInteractionMode] = useState<'inspect' | 'draw' | 'edit'>('inspect');
+  const [draftVertices, setDraftVertices] = useState<[number, number][]>([]);
+  const [flyToTarget, setFlyToTarget] = useState<{
+    lon: number;
+    lat: number;
+    zoom?: number;
+    bbox?: number[];
+  } | null>(null);
+
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const loadAoiContext = useCallback(async (aoi: AOIItem) => {
+    setErrorMessage(null);
+    const [occRes, geoRes, rasRes, manRes, covRes, qaRes] = await Promise.all([
+      apiClient.listOccurrences(aoi.id),
+      apiClient.listGeology(aoi.id),
+      apiClient.listRasters(aoi.id),
+      apiClient.listManifests(aoi.id),
+      apiClient.getAoiCoverage(aoi.id),
+      apiClient.listQualityReports(aoi.id),
+    ]);
+    setOccurrences(occRes);
+    setGeologyUnits(geoRes);
+    setRasters(rasRes);
+    setManifests(manRes);
+    setCoverage(covRes);
+    setQualityReports(qaRes);
+
+    if (manRes.length > 0) {
+      const latest = manRes[0];
+      setSelectedManifestId(latest.id);
+      const preferred =
+        latest.feature_names.find((f) => f === 'slope_deg') || latest.feature_names[0] || '';
+      setSelectedOverlayFeature(preferred);
+    } else {
+      setSelectedManifestId(null);
+      setSelectedOverlayFeature('');
+      setOverlay(null);
     }
-    void loadBackendState();
-    return () => controller.abort();
+
+    try {
+      const mlList = await apiClient.listMLDatasets(aoi.id);
+      setMlDatasets(mlList);
+      setMlUnavailableReason(null);
+    } catch {
+      setMlDatasets([]);
+      setMlUnavailableReason(
+        'ML dataset builder endpoint unavailable or not yet initialized for this workspace.'
+      );
+    }
   }, []);
 
+  const bootstrap = useCallback(async () => {
+    setInitialLoading(true);
+    setErrorMessage(null);
+    try {
+      const [h, srcList, aoiList, gibs] = await Promise.all([
+        apiClient.getHealth(),
+        apiClient.listSources(),
+        apiClient.listAois(),
+        apiClient.listGibsLayers().catch(() => []),
+      ]);
+      setHealth(h);
+      setSources(srcList);
+      setAois(aoiList);
+      setGibsLayers(gibs);
+      if (aoiList.length > 0) {
+        setActiveAoi(aoiList[0]);
+        setFlyToTarget({
+          lon: aoiList[0].centroid[0],
+          lat: aoiList[0].centroid[1],
+          bbox: aoiList[0].bbox,
+        });
+        await loadAoiContext(aoiList[0]);
+      }
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to connect to backend API');
+    } finally {
+      setInitialLoading(false);
+    }
+  }, [loadAoiContext]);
+
   useEffect(() => {
-    if (!mapContainerRef.current) return;
+    void bootstrap();
+  }, [bootstrap]);
 
-    const map = new maplibregl.Map({
-      container: mapContainerRef.current,
-      style: {
-        version: 8,
-        sources: {
-          osm: {
-            type: "raster",
-            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-            tileSize: 256,
-            attribution: "&copy; OpenStreetMap contributors",
-          },
-        },
-        layers: [
-          {
-            id: "osm-basemap",
-            type: "raster",
-            source: "osm",
-          },
-        ],
-      },
-      center: [78.9629, 21.5937], // India-first default center
-      zoom: 4.5,
-    });
-
-    map.addControl(new maplibregl.NavigationControl(), "top-right");
-
-    map.on("load", () => {
-      if (aois.length === 0) return;
-      map.addSource("aois", {
-        type: "geojson",
-        data: {
-          type: "FeatureCollection",
-          features: aois.map((aoi) => ({
-            type: "Feature",
-            geometry: aoi.geometry,
-            properties: {
-              id: aoi.id,
-              name: aoi.name,
-              jurisdiction: aoi.jurisdiction,
-              area_km2: aoi.area_km2,
-            },
-          })),
-        },
+  // Fetch feature overlay descriptor whenever manifest + band changes
+  useEffect(() => {
+    if (!selectedManifestId || !selectedOverlayFeature) {
+      setOverlay(null);
+      return;
+    }
+    let cancelled = false;
+    apiClient
+      .getFeatureOverlay(selectedManifestId, selectedOverlayFeature)
+      .then((desc) => {
+        if (!cancelled) setOverlay(desc);
+      })
+      .catch(() => {
+        if (!cancelled) setOverlay(null);
       });
-      map.addLayer({
-        id: "aois-fill",
-        type: "fill",
-        source: "aois",
-        paint: {
-          "fill-color": "#38bdf8",
-          "fill-opacity": 0.22,
-        },
-      });
-      map.addLayer({
-        id: "aois-outline",
-        type: "line",
-        source: "aois",
-        paint: {
-          "line-color": "#38bdf8",
-          "line-width": 2,
-        },
-      });
-    });
-
     return () => {
-      map.remove();
+      cancelled = true;
     };
-  }, [aois]);
+  }, [selectedManifestId, selectedOverlayFeature]);
+
+  const handleSelectAoi = async (aoi: AOIItem) => {
+    setActiveAoi(aoi);
+    setInteractionMode('inspect');
+    setDraftVertices([]);
+    setSelection({ kind: 'aoi', data: aoi });
+    setFlyToTarget({ lon: aoi.centroid[0], lat: aoi.centroid[1], bbox: aoi.bbox });
+    await loadAoiContext(aoi);
+  };
+
+  const withBusy = async (label: string, fn: () => Promise<void>) => {
+    setBusyAction(label);
+    setErrorMessage(null);
+    setStatusMessage(`${label}...`);
+    try {
+      await fn();
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : `${label} failed`);
+      setStatusMessage(null);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleCreateKhetriPreset = async () => {
+    await withBusy('Creating Khetri Copper Belt AOI', async () => {
+      const created = await apiClient.createAoi({
+        name: 'Khetri Copper Belt',
+        description: 'Proterozoic Delhi Fold Belt copper-iron mineralization corridor',
+        jurisdiction: 'IN',
+        commodity_focus: ['Cu', 'Fe'],
+        geometry: {
+          type: 'Polygon',
+          coordinates: [
+            [
+              [75.77, 27.98],
+              [75.82, 27.98],
+              [75.82, 28.03],
+              [75.77, 28.03],
+              [75.77, 27.98],
+            ],
+          ],
+        },
+      });
+      const updatedList = await apiClient.listAois();
+      setAois(updatedList);
+      await handleSelectAoi(created);
+      setStatusMessage(`Created AOI '${created.name}' (EPSG:${created.processing_epsg}).`);
+    });
+  };
+
+  const handleSaveDrawnAoi = async (name: string, commodities: string[]) => {
+    await withBusy('Saving drawn AOI polygon', async () => {
+      const created = await apiClient.createAoi({
+        name,
+        jurisdiction: 'IN',
+        commodity_focus: commodities,
+        geometry: verticesToGeoJSONPolygon(draftVertices),
+      });
+      const updatedList = await apiClient.listAois();
+      setAois(updatedList);
+      setInteractionMode('inspect');
+      setDraftVertices([]);
+      await handleSelectAoi(created);
+      setStatusMessage(`Saved AOI '${created.name}' (${created.area_km2.toFixed(2)} km²).`);
+    });
+  };
+
+  const handleSaveEditedAoi = async () => {
+    if (!activeAoi) return;
+    await withBusy('Updating AOI polygon geometry', async () => {
+      const updated = await apiClient.updateAoi(activeAoi.id, {
+        geometry: verticesToGeoJSONPolygon(draftVertices),
+      });
+      const updatedList = await apiClient.listAois();
+      setAois(updatedList);
+      setInteractionMode('inspect');
+      setDraftVertices([]);
+      await handleSelectAoi(updated);
+      setStatusMessage(`Updated AOI geometry (${updated.area_km2.toFixed(2)} km²).`);
+    });
+  };
+
+  const handleDeleteAoi = async (aoiId: string) => {
+    await withBusy('Deleting AOI', async () => {
+      await apiClient.deleteAoi(aoiId);
+      const nextList = await apiClient.listAois();
+      setAois(nextList);
+      if (activeAoi?.id === aoiId) {
+        const nextActive = nextList[0] || null;
+        setActiveAoi(nextActive);
+        if (nextActive) {
+          await loadAoiContext(nextActive);
+        } else {
+          setOccurrences([]);
+          setGeologyUnits([]);
+          setRasters([]);
+          setManifests([]);
+          setCoverage(null);
+          setOverlay(null);
+        }
+      }
+      setStatusMessage('AOI deleted.');
+    });
+  };
+
+  const handleToggleLayer = (key: LayerKey) => {
+    setLayers((prev) => prev.map((l) => (l.key === key ? { ...l, visible: !l.visible } : l)));
+  };
+
+  const handleMoveLayer = (key: LayerKey, direction: 'up' | 'down') => {
+    setLayers((prev) => {
+      const idx = prev.findIndex((l) => l.key === key);
+      if (idx === -1) return prev;
+      const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+      if (swapIdx < 0 || swapIdx >= prev.length) return prev;
+      const copy = [...prev];
+      const [item] = copy.splice(idx, 1);
+      copy.splice(swapIdx, 0, item);
+      return copy;
+    });
+  };
+
+  const handleChangeOpacity = (key: LayerKey, opacity: number) => {
+    setLayers((prev) => prev.map((l) => (l.key === key ? { ...l, opacity } : l)));
+  };
 
   return (
-    <div className="layout">
-      <header className="disclaimer-bar">
-        <div>
-          <strong>Scientific Notice:</strong>{" "}
-          {health?.scientific_disclaimer ??
-            "Phase 2 Geospatial Data Infrastructure. Prospectivity proxies do NOT establish proven mineral reserves."}
+    <div className="workbench-shell">
+      <WorkbenchHeader
+        health={health}
+        activeAoi={activeAoi}
+        basemap={basemap}
+        onBasemapChange={setBasemap}
+        rightOpen={rightOpen}
+        onToggleRight={() => setRightOpen((o) => !o)}
+      />
+
+      {(statusMessage || errorMessage || initialLoading) && (
+        <div
+          className={errorMessage ? 'toast-banner error' : 'toast-banner info'}
+          role={errorMessage ? 'alert' : 'status'}
+        >
+          <span>
+            {initialLoading
+              ? 'Loading geospatial workspace...'
+              : errorMessage || statusMessage}
+          </span>
+          {errorMessage && (
+            <button type="button" className="btn-xs" onClick={() => void bootstrap()}>
+              Retry
+            </button>
+          )}
         </div>
-        <span className="badge badge-warn">Phase 2 · SQLite Dev Mode</span>
-      </header>
+      )}
 
-      <main className="workspace">
-        <aside className="sidebar">
-          <section className="card">
-            <h2>Backend Infrastructure</h2>
-            {apiError ? (
-              <div className="meta-row">
-                <span className="badge badge-danger">{apiError}</span>
-              </div>
-            ) : health ? (
-              <>
-                <div className="meta-row">
-                  <span>API Status</span>
-                  <span className="badge badge-ok">{health.status.toUpperCase()}</span>
-                </div>
-                <div className="meta-row">
-                  <span>Database Backend</span>
-                  <span>{health.database_backend}</span>
-                </div>
-                <div className="meta-row">
-                  <span>PostGIS Active</span>
-                  <span>{health.postgis_enabled ? "Yes" : "No (Deferred)"}</span>
-                </div>
-                <div className="meta-row">
-                  <span>In-Memory Cache Entries</span>
-                  <span>{health.cache_stats.entries ?? 0}</span>
-                </div>
-              </>
-            ) : (
-              <div className="meta-row">Checking FastAPI status...</div>
-            )}
-          </section>
+      <main className={rightOpen ? 'workbench-main' : 'workbench-main right-collapsed'}>
+        <LeftControlSidebar
+          aois={aois}
+          activeAoi={activeAoi}
+          sources={sources}
+          rasters={rasters}
+          manifests={manifests}
+          selectedManifestId={selectedManifestId}
+          selectedOverlayFeature={selectedOverlayFeature}
+          layers={layers}
+          interactionMode={interactionMode}
+          draftVertices={draftVertices}
+          busyAction={busyAction}
+          onSelectAoi={(a) => void handleSelectAoi(a)}
+          onFlyTo={(t) => setFlyToTarget(t)}
+          onGeocodeSearch={(q) => apiClient.geocodePlace(q)}
+          onStartDraw={() => {
+            setInteractionMode('draw');
+            setDraftVertices([]);
+          }}
+          onStartEdit={() => {
+            if (!activeAoi) return;
+            setInteractionMode('edit');
+            setDraftVertices(geoJSONPolygonToVertices(activeAoi.geometry));
+          }}
+          onCancelMode={() => {
+            setInteractionMode('inspect');
+            setDraftVertices([]);
+          }}
+          onUndoVertex={() => setDraftVertices((v) => v.slice(0, -1))}
+          onSaveDrawnAoi={handleSaveDrawnAoi}
+          onSaveEditedAoi={handleSaveEditedAoi}
+          onDeleteAoi={handleDeleteAoi}
+          onCreateKhetriPreset={handleCreateKhetriPreset}
+          onRunIngestion={async () => {
+            if (!activeAoi) return;
+            await withBusy('Ingesting Macrostrat & USGS MRDS', async () => {
+              await apiClient.runIngestion(activeAoi.id);
+              await loadAoiContext(activeAoi);
+              setStatusMessage('Ingestion completed.');
+            });
+          }}
+          onImportGeologicalFile={async (file, providerKey, inputEpsg) => {
+            if (!activeAoi) return;
+            await withBusy('Normalizing & importing geological dataset', async () => {
+              const report = await apiClient.importGeologicalFile(
+                activeAoi.id,
+                file,
+                providerKey,
+                inputEpsg
+              );
+              await loadAoiContext(activeAoi);
+              setStatusMessage(
+                `Imported ${report.accepted_rows}/${report.total_rows} rows (${report.rejected_rows} quarantined).`
+              );
+            });
+          }}
+          onToggleLayer={handleToggleLayer}
+          onMoveLayer={handleMoveLayer}
+          onChangeLayerOpacity={handleChangeOpacity}
+          onSelectManifest={(mid) => {
+            setSelectedManifestId(mid);
+            const found = manifests.find((m) => m.id === mid);
+            if (found && found.feature_names.length > 0) {
+              setSelectedOverlayFeature(found.feature_names[0]);
+            }
+          }}
+          onSelectOverlayFeature={setSelectedOverlayFeature}
+          onSearchSatellite={async (provider, collections) => {
+            if (!activeAoi) return;
+            await withBusy(`Searching ${provider}`, async () => {
+              const res = await apiClient.searchSatellite({
+                aoi_id: activeAoi.id,
+                provider,
+                collections,
+                save_metadata: true,
+              });
+              await loadAoiContext(activeAoi);
+              setStatusMessage(
+                `Discovered ${res.scene_count} scenes (${res.saved_count} saved to catalog).`
+              );
+            });
+          }}
+          onDownloadAsset={async (assetId) => {
+            if (!activeAoi) return;
+            await withBusy('Downloading clipped AOI window', async () => {
+              await apiClient.downloadRasterAsset(assetId, activeAoi.id);
+              await loadAoiContext(activeAoi);
+              setStatusMessage('Clipped COG downloaded and verified.');
+            });
+          }}
+          onExtractFeatures={async (resolutionM, includeGeology) => {
+            if (!activeAoi) return;
+            await withBusy(`Extracting ${resolutionM}m projected features`, async () => {
+              await apiClient.extractFeatures(activeAoi.id, {
+                resolution_m: resolutionM,
+                include_geology: includeGeology,
+                run_sync: true,
+              });
+              await loadAoiContext(activeAoi);
+              setStatusMessage('Feature stack extracted and manifest saved.');
+            });
+          }}
+        />
 
-          <section className="card">
-            <h2>Configured AOIs ({aois.length})</h2>
-            {aois.length === 0 ? (
-              <div className="meta-row">
-                No AOIs stored yet. Create one via POST /api/v1/aois.
-              </div>
-            ) : (
-              aois.map((aoi) => (
-                <div key={aoi.id} className="source-item">
-                  <div className="source-title">{aoi.name}</div>
-                  <div className="meta-row">
-                    <span>
-                      {aoi.jurisdiction} · EPSG:{aoi.processing_epsg}
-                    </span>
-                    <span>{aoi.area_km2.toFixed(1)} km²</span>
-                  </div>
-                </div>
-              ))
-            )}
-          </section>
+        <GISMapCanvas
+          aois={aois}
+          activeAoi={activeAoi}
+          occurrences={occurrences}
+          geologyUnits={geologyUnits}
+          rasters={rasters}
+          overlay={overlay}
+          basemap={basemap}
+          gibsLayer={gibsLayers[0] || null}
+          layers={layers}
+          interactionMode={interactionMode}
+          draftVertices={draftVertices}
+          onDraftVerticesChange={setDraftVertices}
+          onSelectFeature={(sel) => {
+            setSelection(sel);
+            if (sel) setRightOpen(true);
+          }}
+          flyToTarget={flyToTarget}
+        />
 
-          <section className="card">
-            <h2>Data Sources &amp; ML Licensing ({sources.length})</h2>
-            {sources.map((src) => (
-              <div key={src.id} className="source-item">
-                <div className="source-title">{src.display_name}</div>
-                <div className="meta-row">
-                  <span>Authority: {src.label_authority}</span>
-                  <span
-                    className={`badge ${
-                      src.is_ml_training_allowed ? "badge-ok" : "badge-danger"
-                    }`}
-                  >
-                    {src.is_ml_training_allowed ? "ML Allowed" : "ML Blocked"}
-                  </span>
-                </div>
-                <div className="meta-row">
-                  <span>{src.license}</span>
-                </div>
-              </div>
-            ))}
-          </section>
-        </aside>
-
-        <section className="map-container" aria-label="Geospatial Map Workspace">
-          <div ref={mapContainerRef} className="map-canvas" />
-        </section>
+        <RightInspectorDrawer
+          open={rightOpen}
+          activeAoi={activeAoi}
+          selection={selection}
+          coverage={coverage}
+          qualityReports={qualityReports}
+          manifests={manifests}
+          mlDatasets={mlDatasets}
+          mlUnavailableReason={mlUnavailableReason}
+          busyAction={busyAction}
+          onBuildMLDataset={async () => {
+            if (!activeAoi) return;
+            await withBusy('Building spatial ML dataset', async () => {
+              const ds = await apiClient.buildMLDataset(activeAoi.id, {
+                manifest_id: selectedManifestId,
+              });
+              await loadAoiContext(activeAoi);
+              setStatusMessage(`Built ML snapshot (${ds.readiness_status}).`);
+            });
+          }}
+          onEvaluateMLBaseline={async (datasetId) => {
+            if (!activeAoi) return;
+            await withBusy('Evaluating spatial CV baseline', async () => {
+              await apiClient.evaluateMLBaseline(datasetId);
+              await loadAoiContext(activeAoi);
+              setStatusMessage('Spatial CV baseline metrics updated.');
+            });
+          }}
+        />
       </main>
     </div>
   );
 }
 
+export default App;

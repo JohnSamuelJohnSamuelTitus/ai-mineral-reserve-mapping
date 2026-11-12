@@ -113,6 +113,40 @@ class AOIRepository:
         self._db.commit()
         return True
 
+    def update(
+        self,
+        aoi: AreaOfInterest,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        commodity_focus: list[str] | None = None,
+        deposit_model: str | None = None,
+        normalized: NormalizedAOIGeometry | None = None,
+    ) -> AreaOfInterest:
+        if name is not None:
+            aoi.name = name
+        if description is not None:
+            aoi.description = description
+        if commodity_focus is not None:
+            aoi.commodity_focus = commodity_focus
+        if deposit_model is not None:
+            aoi.deposit_model = deposit_model
+        if normalized is not None:
+            min_lon, min_lat, max_lon, max_lat = normalized.bbox
+            aoi.geom_geojson = normalized.geojson_str
+            aoi.geom_wkt = normalized.wkt
+            aoi.bbox_min_lon = min_lon
+            aoi.bbox_min_lat = min_lat
+            aoi.bbox_max_lon = max_lon
+            aoi.bbox_max_lat = max_lat
+            aoi.centroid_lon = normalized.centroid_lon
+            aoi.centroid_lat = normalized.centroid_lat
+            aoi.processing_epsg = normalized.processing_epsg
+            aoi.area_km2 = normalized.area_km2
+        self._db.commit()
+        self._db.refresh(aoi)
+        return aoi
+
 
 class DataSourceRepository:
     """Manages provider metadata, health status, and ML-training license flags."""
