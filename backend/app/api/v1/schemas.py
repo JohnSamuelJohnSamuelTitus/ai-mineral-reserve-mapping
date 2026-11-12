@@ -117,11 +117,18 @@ class RasterAssetResponse(BaseModel):
     stac_collection: str | None
     stac_item_id: str
     asset_type: str
+    platform: str | None = None
+    product_type: str | None = None
     acquired_at: datetime | None
     cloud_cover_pct: float | None
     resolution_m: float | None
     bbox: list[float]
     storage_uri: str
+    local_path: str | None = None
+    download_status: str = "discovered"
+    requires_auth: bool = False
+    estimated_size_mb: float | None = None
+    bands_available: list[str] = Field(default_factory=list)
     data_origin: str
     collected_at: datetime
 
@@ -134,6 +141,68 @@ class IngestionJobResponse(BaseModel):
     records_written: int
     error_message: str | None
     details_json: dict[str, Any]
+    started_at: datetime
+    finished_at: datetime | None
+
+
+class SatelliteSearchRequest(BaseModel):
+    aoi_id: str
+    provider: Literal["mpc_stac", "earth_search_stac", "nasa_cmr_stac"] = "mpc_stac"
+    collections: list[str] = Field(default_factory=lambda: ["sentinel-2-l2a", "cop-dem-glo-30"])
+    datetime_range: str | None = None
+    max_cloud_cover: float | None = Field(default=30.0, ge=0.0, le=100.0)
+    limit: int = Field(default=8, ge=1, le=25)
+    save_metadata: bool = True
+
+
+class SatelliteSearchResponse(BaseModel):
+    aoi_id: str
+    provider: str
+    collections_queried: list[str]
+    scene_count: int
+    saved_count: int
+    scenes: list[dict[str, Any]]
+
+
+class DatasetQualityReportResponse(BaseModel):
+    id: str
+    aoi_id: str | None
+    source_provider_key: str
+    dataset_name: str
+    data_origin: str
+    total_rows: int
+    accepted_rows: int
+    rejected_rows: int
+    duplicate_rows: int
+    missing_coords_count: int
+    invalid_coords_count: int
+    missing_commodity_count: int
+    completeness_pct: float
+    commodity_distribution: dict[str, int]
+    warnings: list[str]
+    created_at: datetime
+
+
+class QuarantinedRecordResponse(BaseModel):
+    id: str
+    aoi_id: str | None
+    source_provider_key: str
+    external_id: str | None
+    rejection_reason: str
+    quality_flags: list[str]
+    raw_record: dict[str, Any]
+    created_at: datetime
+
+
+class ProcessingJobResponse(BaseModel):
+    id: str
+    aoi_id: str | None
+    job_type: str
+    status: str
+    progress_pct: int
+    parameters_json: dict[str, Any]
+    result_summary_json: dict[str, Any]
+    error_message: str | None
     started_at: datetime
     finished_at: datetime | None
 

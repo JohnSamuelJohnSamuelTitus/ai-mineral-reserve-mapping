@@ -8,6 +8,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.api.v1.geology_routes import router as geology_router
+from app.api.v1.satellite_routes import raster_asset_to_response
+from app.api.v1.satellite_routes import router as satellite_router
 from app.api.v1.schemas import (
     AOICreateRequest,
     AOIResponse,
@@ -49,6 +52,8 @@ from app.integrations.stac import SentinelSTACWithFallback, STACSearchAdapter
 from app.integrations.usgs_mrds import USGSMRDSAdapter
 
 router = APIRouter()
+router.include_router(geology_router)
+router.include_router(satellite_router)
 
 _shared_cache = InMemoryTTLCache()
 
@@ -348,22 +353,7 @@ def list_aoi_rasters(aoi_id: str, db: Session = Depends(get_db)) -> list[RasterA
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AOI not found")
 
     assets = RasterAssetRepository(db).list_for_aoi(aoi.id)
-    return [
-        RasterAssetResponse(
-            id=r.id,
-            stac_collection=r.stac_collection,
-            stac_item_id=r.stac_item_id,
-            asset_type=r.asset_type,
-            acquired_at=r.acquired_at,
-            cloud_cover_pct=r.cloud_cover_pct,
-            resolution_m=r.resolution_m,
-            bbox=[r.bbox_min_lon, r.bbox_min_lat, r.bbox_max_lon, r.bbox_max_lat],
-            storage_uri=r.storage_uri,
-            data_origin=r.data_origin,
-            collected_at=r.collected_at,
-        )
-        for r in assets
-    ]
+    return [raster_asset_to_response(r) for r in assets]
 
 
 @router.get("/search/geocode", tags=["search"])

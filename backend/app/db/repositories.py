@@ -13,10 +13,15 @@ from sqlalchemy.orm import Session
 from app.core.crs import NormalizedAOIGeometry
 from app.db.models import (
     AreaOfInterest,
+    DatasetQualityReport,
     DataSource,
+    FeatureManifest,
     GeologicalUnit,
     IngestionJob,
     MineralOccurrence,
+    MLDatasetVersion,
+    OccurrenceQuarantine,
+    ProcessingJob,
     RasterAsset,
 )
 
@@ -275,9 +280,40 @@ class RasterAssetRepository:
             else:
                 existing.cloud_cover_pct = asset.cloud_cover_pct
                 existing.storage_uri = asset.storage_uri
+                existing.platform = asset.platform or existing.platform
+                existing.product_type = asset.product_type or existing.product_type
+                existing.requires_auth = asset.requires_auth
+                existing.estimated_size_mb = asset.estimated_size_mb or existing.estimated_size_mb
+                existing.bands_available = asset.bands_available or existing.bands_available
                 existing.band_metadata = asset.band_metadata
         self._db.commit()
         return written
+
+    def get(self, asset_id: str) -> RasterAsset | None:
+        return self._db.get(RasterAsset, asset_id)
+
+    def mark_downloaded(
+        self,
+        asset: RasterAsset,
+        *,
+        local_path: str,
+        checksum_sha256: str,
+        crs_epsg: int | None = None,
+    ) -> RasterAsset:
+        asset.local_path = local_path
+        asset.checksum_sha256 = checksum_sha256
+        asset.download_status = "downloaded"
+        if crs_epsg is not None:
+            asset.crs_epsg = crs_epsg
+        self._db.commit()
+        self._db.refresh(asset)
+        return asset
+
+    def mark_download_failed(self, asset: RasterAsset) -> RasterAsset:
+        asset.download_status = "failed"
+        self._db.commit()
+        self._db.refresh(asset)
+        return asset
 
     def list_for_aoi(self, aoi_id: str) -> list[RasterAsset]:
         stmt = (
@@ -322,4 +358,151 @@ class IngestionJobRepository:
 
     def list_recent(self, limit: int = 50) -> list[IngestionJob]:
         stmt = select(IngestionJob).order_by(IngestionJob.started_at.desc()).limit(limit)
+        return list(self._db.scalars(stmt).all())
+
+
+class QuarantineAndQualityRepository:
+    """Persists quarantined occurrence rows and dataset quality audit summaries."""
+
+    def __init__(self, db: Session) -> None:
+        self._db = db
+
+    def save_report_and_quarantine(
+        self,
+        report: DatasetQualityReport,
+        quarantined: list[OccurrenceQuarantine],
+    ) -> DatasetQualityReport:
+        self._db.add(report)
+        for item in quarantined:
+            self._db.add(item)
+        self._db.commit()
+        self._db.refresh(report)
+        return report
+
+    def list_reports_for_aoi(self, aoi_id: str) -> list[DatasetQualityReport]:
+        stmt = (
+            select(DatasetQualityReport)
+            .where(DatasetQualityReport.aoi_id == aoi_id)
+            .order_by(DatasetQualityReport.created_at.desc())
+        )
+        return list(self._db.scalars(stmt).all())
+
+    def list_quarantined_for_aoi(
+        self, aoi_id: str, *, limit: int = 100
+    ) -> list[OccurrenceQuarantine]:
+        stmt = (
+            select(OccurrenceQuarantine)
+            .where(OccurrenceQuarantine.aoi_id == aoi_id)
+            .order_by(OccurrenceQuarantine.created_at.desc())
+            .limit(limit)
+        )
+        return list(self._db.scalars(stmt).all())
+
+
+class ProcessingJobRepository:
+    """Repository for background processing jobs (downloads, features, ML dataset prep)."""
+
+    def __init__(self, db: Session) -> None:
+        self._db = db
+
+    def create(
+        self, *, job_type: str, aoi_id: str | None = None, parameters: dict | None = None
+    ) -> ProcessingJob:
+        job = ProcessingJob(
+            job_type=job_type,
+            aoi_id=aoi_id,
+            status="pending",
+            progress_pct=0,
+            parameters_json=parameters or {},
+            result_summary_json={},
+        )
+        self._db.add(job)
+        self._db.commit()
+        self._db.refresh(job)
+        return job
+
+    def get(self, job_id: str) -> ProcessingJob | None:
+        return self._db.get(ProcessingJob, job_id)
+
+    def mark_running(self, job: ProcessingJob, progress_pct: int = 10) -> ProcessingJob:
+        job.status = "running"
+        job.progress_pct = progress_pct
+        self._db.commit()
+        self._db.refresh(job)
+        return job
+
+    def complete(self, job: ProcessingJob, *, summary: dict) -> ProcessingJob:
+        job.status = "completed"
+        job.progress_pct = 100
+        job.result_summary_json = summary
+        job.finished_at = datetime.now(UTC)
+        self._db.commit()
+        self._db.refresh(job)
+        return job
+
+    def fail(self, job: ProcessingJob, *, error_message: str) -> ProcessingJob:
+        job.status = "failed"
+        job.error_message = error_message[:2000]
+        job.finished_at = datetime.now(UTC)
+        self._db.commit()
+        self._db.refresh(job)
+        return job
+
+    def list_for_aoi(self, aoi_id: str | None = None, *, limit: int = 50) -> list[ProcessingJob]:
+        stmt = select(ProcessingJob).order_by(ProcessingJob.started_at.desc()).limit(limit)
+        if aoi_id is not None:
+            stmt = (
+                select(ProcessingJob)
+                .where(ProcessingJob.aoi_id == aoi_id)
+                .order_by(ProcessingJob.started_at.desc())
+                .limit(limit)
+            )
+        return list(self._db.scalars(stmt).all())
+
+
+class FeatureManifestRepository:
+    """Repository for reproducible geospatial feature-engineering manifests."""
+
+    def __init__(self, db: Session) -> None:
+        self._db = db
+
+    def create(self, manifest: FeatureManifest) -> FeatureManifest:
+        self._db.add(manifest)
+        self._db.commit()
+        self._db.refresh(manifest)
+        return manifest
+
+    def get(self, manifest_id: str) -> FeatureManifest | None:
+        return self._db.get(FeatureManifest, manifest_id)
+
+    def list_for_aoi(self, aoi_id: str) -> list[FeatureManifest]:
+        stmt = (
+            select(FeatureManifest)
+            .where(FeatureManifest.aoi_id == aoi_id)
+            .order_by(FeatureManifest.created_at.desc())
+        )
+        return list(self._db.scalars(stmt).all())
+
+
+class MLDatasetVersionRepository:
+    """Repository for spatial ML dataset snapshots and readiness reports."""
+
+    def __init__(self, db: Session) -> None:
+        self._db = db
+
+    def create(self, version: MLDatasetVersion) -> MLDatasetVersion:
+        self._db.add(version)
+        self._db.commit()
+        self._db.refresh(version)
+        return version
+
+    def get(self, dataset_id: str) -> MLDatasetVersion | None:
+        return self._db.get(MLDatasetVersion, dataset_id)
+
+    def list_for_aoi(self, aoi_id: str) -> list[MLDatasetVersion]:
+        stmt = (
+            select(MLDatasetVersion)
+            .where(MLDatasetVersion.aoi_id == aoi_id)
+            .order_by(MLDatasetVersion.created_at.desc())
+        )
         return list(self._db.scalars(stmt).all())

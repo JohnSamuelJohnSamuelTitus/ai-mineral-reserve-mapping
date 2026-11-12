@@ -28,9 +28,12 @@ class Settings(BaseSettings):
     api_port: int = Field(default=8000, ge=1, le=65535)
     cors_origins: str = Field(default="http://localhost:5173")
 
-    # Phase 2 default: SQLite for local Windows development; swap to PostgreSQL+PostGIS later.
+    # Phase 2/3 storage & disk-safety guardrails (limited local C: drive)
     database_url: str = Field(default="sqlite:///./data/mineral_dev.db")
     data_dir: Path = Field(default=PROJECT_ROOT / "data")
+    raster_max_download_mb: float = Field(default=150.0, gt=1.0, le=2000.0)
+    upload_max_file_mb: float = Field(default=25.0, gt=0.1, le=250.0)
+    min_free_disk_gb: float = Field(default=2.0, gt=0.2)
 
     # Cache configuration (abstracted for future Redis swap)
     cache_default_ttl_seconds: int = Field(default=900, ge=1)
@@ -52,6 +55,10 @@ class Settings(BaseSettings):
     openalex_base_url: str = Field(default="https://api.openalex.org")
     nominatim_base_url: str = Field(default="https://nominatim.openstreetmap.org")
     data_gov_in_base_url: str = Field(default="https://api.data.gov.in/resource")
+    nasa_gibs_wmts_url: str = Field(
+        default="https://gibs.earthdata.nasa.gov/wmts/epsg3857/best"
+    )
+    mpc_sas_token_url: str = Field(default="https://planetarycomputer.microsoft.com/api/sas/v1/token")
 
     # Optional credentials (SecretStr prevents accidental serialization or logging)
     cdse_client_id: SecretStr | None = Field(default=None)
@@ -74,6 +81,30 @@ class Settings(BaseSettings):
                 f"Unsupported database_url scheme; expected one of {allowed_prefixes}"
             )
         return value
+
+    @property
+    def rasters_dir(self) -> Path:
+        path = (self.data_dir / "rasters").resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def features_dir(self) -> Path:
+        path = (self.data_dir / "features").resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def ml_datasets_dir(self) -> Path:
+        path = (self.data_dir / "ml_datasets").resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def uploads_dir(self) -> Path:
+        path = (self.data_dir / "uploads").resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     @property
     def cors_origin_list(self) -> list[str]:
