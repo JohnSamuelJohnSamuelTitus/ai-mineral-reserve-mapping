@@ -41,12 +41,17 @@ def db_session(test_engine: Engine) -> Generator[Session, None, None]:
 
 
 @pytest.fixture()
-def client(test_db_path: Path, test_engine: Engine) -> Generator[TestClient, None, None]:
+def client(
+    test_db_path: Path, test_engine: Engine, tmp_path: Path
+) -> Generator[TestClient, None, None]:
     factory = sessionmaker(bind=test_engine, autocommit=False, autoflush=False, expire_on_commit=False)
     with factory() as seed_session:
         seed_default_data_sources(seed_session)
 
-    test_settings = Settings(database_url=f"sqlite:///{test_db_path.as_posix()}")
+    test_settings = Settings(
+        database_url=f"sqlite:///{test_db_path.as_posix()}",
+        data_dir=tmp_path / "data",
+    )
     test_cache = InMemoryTTLCache()
 
     def _override_db() -> Generator[Session, None, None]:

@@ -39,3 +39,4 @@ def get_nasa_gibs_overlay_layers(base_url: str = "https://gibs.earthdata.nasa.go
             "note": "Pre-rendered hillshade visualization ONLY; use Copernicus DEM / SRTM COGs for slope/aspect.",
         },
     ]
+

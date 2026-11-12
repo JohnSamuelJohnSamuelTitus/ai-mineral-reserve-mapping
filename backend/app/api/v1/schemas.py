@@ -206,3 +206,76 @@ class ProcessingJobResponse(BaseModel):
     started_at: datetime
     finished_at: datetime | None
 
+
+class FeatureExtractRequest(BaseModel):
+    resolution_m: float = Field(default=100.0, gt=5.0, le=5000.0)
+    dem_asset_id: str | None = None
+    include_geology: bool = True
+    run_sync: bool = False
+
+
+class FeatureManifestResponse(BaseModel):
+    id: str
+    aoi_id: str
+    target_crs_epsg: int
+    resolution_m: float
+    grid_rows: int
+    grid_cols: int
+    nodata_value: float
+    status: str
+    input_datasets_json: list[dict[str, Any]]
+    input_scene_ids: list[str]
+    feature_names: list[str]
+    output_files_json: dict[str, str]
+    warnings_json: list[str]
+    manifest_json: dict[str, Any]
+    data_origin: str
+    created_at: datetime
+
+
+class RasterInspectResponse(BaseModel):
+    asset_id: str
+    local_path: str
+    epsg: int | None
+    is_geographic: bool
+    crs_wkt: str | None
+    width: int
+    height: int
+    count: int
+    dtype: str
+    nodata: float | None
+    resolution: list[float]
+    bounds: list[float]
+    stats: dict[str, Any]
+
+
+class FeatureOverlayDescriptorResponse(BaseModel):
+    manifest_id: str
+    feature_name: str
+    min: float | None
+    max: float | None
+    mean: float | None
+    valid_pct: float | None
+    nodata_value: float
+    wgs84_corners: list[list[float]]
+    image_url: str
+
+
+class AOICoverageResponse(BaseModel):
+    aoi_id: str
+    aoi_name: str
+    processing_epsg: int
+    area_km2: float
+    occurrence_total: int
+    occurrence_ml_trainable: int
+    occurrence_reference_only: int
+    quarantined_count: int
+    quality_reports_count: int
+    geological_units_count: int
+    raster_scenes_discovered: int
+    raster_scenes_downloaded: int
+    feature_manifests_count: int
+    latest_manifest_id: str | None
+    missing_layers: list[str]
+    warnings: list[str]
+

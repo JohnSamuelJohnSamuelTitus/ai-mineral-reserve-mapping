@@ -129,3 +129,4 @@ def test_geojson_import_validates_format(tmp_path: Path) -> None:
             license_name="GODL",
             label_authority="indian_official",
         )
+

@@ -231,3 +231,4 @@ def list_quarantined_records(
         )
         for q in rows
     ]
+

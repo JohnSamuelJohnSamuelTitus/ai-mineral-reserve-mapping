@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.api.v1.features_routes import router as features_router
 from app.api.v1.geology_routes import router as geology_router
 from app.api.v1.satellite_routes import raster_asset_to_response
 from app.api.v1.satellite_routes import router as satellite_router
@@ -54,6 +55,7 @@ from app.integrations.usgs_mrds import USGSMRDSAdapter
 router = APIRouter()
 router.include_router(geology_router)
 router.include_router(satellite_router)
+router.include_router(features_router)
 
 _shared_cache = InMemoryTTLCache()
 

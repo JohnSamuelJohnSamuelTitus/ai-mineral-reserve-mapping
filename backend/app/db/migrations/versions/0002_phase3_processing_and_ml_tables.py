@@ -173,3 +173,4 @@ def downgrade() -> None:
         batch_op.drop_column("local_path")
         batch_op.drop_column("product_type")
         batch_op.drop_column("platform")
+

@@ -55,6 +55,7 @@ def download_cog_window_for_aoi(
     tmp_path = target_path.with_suffix(".tif.tmp")
 
     vsi_env: dict[str, Any] = {
+        "AWS_NO_SIGN_REQUEST": "YES",
         "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
         "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif,.tiff,.TIF,.TIFF",
         "VSI_CACHE": "TRUE",

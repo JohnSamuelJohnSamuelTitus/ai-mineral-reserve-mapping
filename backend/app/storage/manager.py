@@ -92,3 +92,4 @@ def managed_temp_dir(prefix: str = "mineral_proc_") -> Iterator[Path]:
     """Create a temporary directory and guarantee cleanup after processing."""
     with tempfile.TemporaryDirectory(prefix=prefix) as tmp:
         yield Path(tmp)
+
