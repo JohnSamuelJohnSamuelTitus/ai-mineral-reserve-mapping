@@ -288,3 +288,34 @@ class AOICoverageResponse(BaseModel):
     missing_layers: list[str]
     warnings: list[str]
 
+
+class MLDatasetBuildRequest(BaseModel):
+    manifest_id: str | None = None
+    version_tag: str = Field(default="v1", min_length=1, max_length=64)
+    block_size_m: float = Field(default=1000.0, gt=50.0, le=50000.0)
+    seed: int = Field(default=42, ge=0, le=1_000_000)
+    include_dist_to_occurrence: bool = False
+    min_positives: int = Field(default=10, ge=1, le=500)
+    min_positive_blocks: int = Field(default=3, ge=1, le=50)
+    min_valid_coverage_pct: float = Field(default=50.0, ge=0.0, le=100.0)
+
+
+class MLDatasetVersionResponse(BaseModel):
+    id: str
+    aoi_id: str
+    manifest_id: str | None
+    version_tag: str
+    seed: int
+    positive_count: int
+    unlabeled_count: int
+    explicit_negative_count: int
+    spatial_block_count: int
+    feature_columns: list[str]
+    readiness_status: Literal["ready", "blocked"]
+    blocking_reasons: list[str]
+    leakage_checks: dict[str, Any]
+    metrics_json: dict[str, Any]
+    artifact_path: str | None
+    data_origin: str
+    created_at: datetime
+

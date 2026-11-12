@@ -313,6 +313,16 @@ export const RightInspectorDrawer: React.FC<RightInspectorDrawerProps> = ({
                               ))}
                             </ul>
                           )}
+                          {typeof ds.metrics_json?.evaluation_scheme === 'string' && (
+                            <div className="small-note" data-testid="ml-baseline-metrics">
+                              <strong>{ds.metrics_json.evaluation_scheme}</strong>
+                              <br />
+                              LogReg PU-PR-AUC:{' '}
+                              {String((ds.metrics_json.logistic_regression as Record<string, unknown>)?.pu_pr_auc ?? '—')}
+                              {' · '}RF PU-PR-AUC:{' '}
+                              {String((ds.metrics_json.random_forest as Record<string, unknown>)?.pu_pr_auc ?? '—')}
+                            </div>
+                          )}
                           <button
                             type="button"
                             className="btn-secondary full-width"
